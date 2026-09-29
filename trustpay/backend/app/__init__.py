@@ -1,0 +1,1 @@
+"""TrustPay backend application package."""

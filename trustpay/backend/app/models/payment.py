@@ -4,16 +4,29 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
+PAYMENT_STATUSES = (
+    "CREATED",
+    "PENDING_RISK",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "REJECTED",
+    "VERIFICATION_REQUIRED",
+    "HELD",
+)
+_PAYMENT_STATUS_CHECK = "status IN (" + ", ".join(f"'{status}'" for status in PAYMENT_STATUSES) + ")"
+
 
 class Payment(Base):
     __tablename__ = "payments"
     __table_args__ = (
+        CheckConstraint(_PAYMENT_STATUS_CHECK, name="ck_payments_application_status"),
         UniqueConstraint("transaction_id", name="uq_payments_transaction_id"),
         UniqueConstraint("sender_user_id", "idempotency_key", name="uq_payments_sender_idempotency"),
     )

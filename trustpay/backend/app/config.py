@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     ML_MODEL_PATH: Path = Path(__file__).resolve().parents[2] / "ml" / "models" / "fraud_model.joblib"
+    DRUNIX_MODE: str = "off"
+    DRUNIX_NETWORK_PATH: Path = Path(__file__).resolve().parents[2] / ".." / "drunix" / "drunix-network" / "test-network"
+    DRUNIX_CHANNEL: str = "mychannel"
+    DRUNIX_CHAINCODE: str = "trustpay"
 
     model_config = SettingsConfigDict(
         env_file=".env",

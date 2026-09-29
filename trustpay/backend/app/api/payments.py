@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.api.auth import get_current_active_user
 from app.auth.security import normalize_email
 from app.database import get_db
+from app.drunix.service import DrunixClientError, DrunixPaymentClient
 from app.models.account import Account
 from app.models.audit_log import AuditLog
 from app.models.beneficiary import Beneficiary
@@ -33,6 +34,8 @@ router = APIRouter(prefix="/payments", tags=["payments"])
 logger = logging.getLogger(__name__)
 _risk_assessment_service = RiskAssessmentService()
 _policy_service = PolicyService()
+_drunix_client = DrunixPaymentClient()
+_DRUNIX_FINAL_PAYMENT_STATUSES = {"COMPLETED", "VERIFICATION_REQUIRED", "HELD", "REJECTED"}
 
 
 def get_risk_assessment_service() -> RiskAssessmentService:
@@ -41,6 +44,10 @@ def get_risk_assessment_service() -> RiskAssessmentService:
 
 def get_policy_service() -> PolicyService:
     return _policy_service
+
+
+def get_drunix_client() -> DrunixPaymentClient:
+    return _drunix_client
 
 
 def _audit(db: Session, user_id: uuid.UUID, event_type: str, event_status: str, details: dict) -> None:
@@ -89,6 +96,14 @@ def _return_existing(db: Session, current_user: User, payment: Payment) -> JSONR
     return JSONResponse(status_code=status.HTTP_200_OK, content=_payment_json(payment))
 
 
+def _apply_drunix_final_status(payment: Payment, drunix_state: dict) -> None:
+    ledger_payment = drunix_state.get("data")
+    final_status = ledger_payment.get("status") if isinstance(ledger_payment, dict) else None
+    if final_status not in _DRUNIX_FINAL_PAYMENT_STATUSES:
+        raise DrunixClientError("DRUNIX synchronization did not return a terminal payment status")
+    payment.status = final_status
+
+
 @router.post("", response_model=PaymentResponse, status_code=status.HTTP_201_CREATED)
 def create_payment(
     payload: PaymentCreateRequest,
@@ -96,6 +111,7 @@ def create_payment(
     db: Session = Depends(get_db),
     risk_service: RiskAssessmentService = Depends(get_risk_assessment_service),
     policy_service: PolicyService = Depends(get_policy_service),
+    drunix_client: DrunixPaymentClient = Depends(get_drunix_client),
 ) -> Payment | JSONResponse:
     if payload.currency != "INR":
         _reject(db, current_user.id, "payment_validation", "unsupported_currency", status.HTTP_422_UNPROCESSABLE_ENTITY, "Unsupported currency")
@@ -249,6 +265,33 @@ def create_payment(
             "success",
             {"transaction_id": payment.transaction_id, "decision": policy_result.decision},
         )
+        try:
+            drunix_state = drunix_client.sync_payment(payment, risk_result, policy_result)
+            if drunix_state is not None:
+                _apply_drunix_final_status(payment, drunix_state)
+        except DrunixClientError as exc:
+            db.rollback()
+            logger.exception("Payment could not be synced with DRUNIX")
+            _audit(
+                db,
+                current_user.id,
+                "payment_drunix_sync",
+                "failed",
+                {"transaction_id": payment.transaction_id, "reason": str(exc)},
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Payment could not be synchronized with the DRUNIX ledger",
+            ) from exc
+        if drunix_state is not None:
+            _audit(
+                db,
+                current_user.id,
+                "payment_drunix_sync",
+                "success",
+                {"transaction_id": payment.transaction_id, "state": drunix_state.get("status")},
+            )
         db.commit()
     except (RiskAssessmentError, PolicyEvaluationError) as exc:
         db.rollback()
@@ -297,6 +340,30 @@ def list_payments(
         .order_by(Payment.created_at.desc(), Payment.id.asc())
         .all()
     )
+
+
+@router.get("/{transaction_id}/drunix")
+def get_payment_drunix(
+    transaction_id: str,
+    current_user: User = Depends(get_current_active_user),
+    drunix_client: DrunixPaymentClient = Depends(get_drunix_client),
+) -> dict:
+    _ = current_user
+    if not drunix_client.is_enabled():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DRUNIX integration is disabled")
+    return drunix_client.query_payment(transaction_id)
+
+
+@router.get("/{transaction_id}/drunix/history")
+def get_payment_drunix_history(
+    transaction_id: str,
+    current_user: User = Depends(get_current_active_user),
+    drunix_client: DrunixPaymentClient = Depends(get_drunix_client),
+) -> dict:
+    _ = current_user
+    if not drunix_client.is_enabled():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DRUNIX integration is disabled")
+    return {"transaction_id": transaction_id, "history": drunix_client.query_payment_history(transaction_id)}
 
 
 @router.get("/{transaction_id}", response_model=PaymentResponse)

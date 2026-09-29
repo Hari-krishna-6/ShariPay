@@ -100,7 +100,16 @@ class PaymentResponse(BaseModel):
     receiver_user_id: UUID
     amount: Decimal
     currency: str
-    status: Literal["CREATED", "PENDING_RISK", "FAILED", "CANCELLED"]
+    status: Literal[
+        "CREATED",
+        "PENDING_RISK",
+        "FAILED",
+        "CANCELLED",
+        "COMPLETED",
+        "VERIFICATION_REQUIRED",
+        "HELD",
+        "REJECTED",
+    ]
     risk_assessment: PaymentRiskAssessmentResponse | None = None
     policy_result: PaymentPolicyResultResponse | None = None
     created_at: datetime

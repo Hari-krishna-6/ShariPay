@@ -3,12 +3,14 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import jwt
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.auth.security import hash_password, hash_refresh_token
+from app.config import settings
 from app.database import SessionLocal
 from app.main import app
 from app.models.refresh_token import RefreshToken
@@ -764,3 +766,52 @@ def test_policy_failure_rolls_back_payment_and_risk_assessment() -> None:
             AuditLog.event_type == "payment_policy_evaluation",
             AuditLog.event_status == "failed",
         ).count() == 1
+
+
+def test_drunix_settings_and_contract_sequence_are_configured_for_the_live_network() -> None:
+    assert hasattr(settings, "DRUNIX_MODE")
+    assert hasattr(settings, "DRUNIX_NETWORK_PATH")
+    assert hasattr(settings, "DRUNIX_CHANNEL")
+    assert hasattr(settings, "DRUNIX_CHAINCODE")
+    assert settings.DRUNIX_CHANNEL == "mychannel"
+    assert settings.DRUNIX_CHAINCODE == "trustpay"
+
+    from app.drunix.service import DrunixPaymentClient
+
+    client = DrunixPaymentClient(network_path="/tmp/test-network", channel="mychannel", chaincode="trustpay")
+    expected = {
+        "APPROVE": ["CreatePayment", "AssessRisk", "ApprovePayment", "CompletePayment"],
+        "VERIFY": ["CreatePayment", "AssessRisk", "RequestVerification"],
+        "HOLD": ["CreatePayment", "AssessRisk", "HoldPayment"],
+        "REJECT": ["CreatePayment", "AssessRisk", "RejectPayment"],
+    }
+    assert client._contract_sequence_for("APPROVE") == expected["APPROVE"]
+    assert client._contract_sequence_for("VERIFY") == expected["VERIFY"]
+    assert client._contract_sequence_for("HOLD") == expected["HOLD"]
+    assert client._contract_sequence_for("REJECT") == expected["REJECT"]
+
+
+def test_drunix_subprocess_prepends_configured_peer_cli_for_invoke_and_query(monkeypatch) -> None:
+    from app.drunix.service import DrunixPaymentClient
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("app.drunix.service.subprocess.run", fake_run)
+    client = DrunixPaymentClient(network_path="/mnt/drunix-network/test-network")
+    client.enabled = True
+
+    client._invoke("CreatePayment", ["tx-1", "sender", "receiver", "2500", "INR"])
+    client._query("GetPayment", ["tx-1"])
+
+    assert len(calls) == 2
+    expected_prefix = 'export PATH="/mnt/drunix-network/bin:$PATH" && '
+    for command, kwargs in calls:
+        assert command[:2] == ["bash", "-lc"]
+        assert command[2].startswith(expected_prefix)
+        assert kwargs == {"capture_output": True, "text": True, "check": False}
+    assert "./network.sh cc invoke" in calls[0][0][2]
+    assert "./network.sh cc query" in calls[1][0][2]

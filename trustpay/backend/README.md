@@ -18,7 +18,6 @@ Account balances are simulated demo values, not banking funds. Creating a paymen
 
 The following remain intentionally out of scope:
 
-- DRUNIX network integration
 - chaincode changes
 - frontend code
 - UPI, NPCI, external banks, and payment gateways
@@ -59,6 +58,6 @@ Payment creation loads the existing `ml/models/fraud_model.joblib` artifact on f
 
 Amount, time, account age, new-beneficiary status, payment frequency/velocity, average historical payment amount, deviation, and failed payment-attempt audits are derived from application records. The model currently has no device or location context, and no adjudicated fraud history exists, so `is_new_device`, `is_location_change`, and `previous_fraud_count` use deterministic zero values. A new account with no payment history uses a documented neutral historical average of INR 2,200.00; later assessments use the sender's observed prior payment average.
 
-Successful payment requests remain `PENDING_RISK` after policy evaluation. Risk score, level, and rule-based factors are stored in `risk_assessments`; policy decision, reason, version, and triggered rules are stored separately in `policy_decisions`. Both results are returned only to the payment sender and receiver. LOW risk maps to `APPROVE`, MEDIUM to `VERIFY`, and HIGH to `HOLD`. Inactive parties/accounts, self-payment, invalid or insufficient amounts, excessive failed attempts, invalid lifecycle status, or inconsistent risk metadata map to `REJECT`. Prior-fraud history and repeated failures can escalate to `HOLD`.
+Risk score, level, and rule-based factors are stored in `risk_assessments`; policy decision, reason, version, and triggered rules are stored separately in `policy_decisions`. Both results are returned only to the payment sender and receiver. LOW risk maps to `APPROVE`, MEDIUM to `VERIFY`, and HIGH to `HOLD`. Inactive parties/accounts, self-payment, invalid or insufficient amounts, excessive failed attempts, invalid lifecycle status, or inconsistent risk metadata map to `REJECT`. Prior-fraud history and repeated failures can escalate to `HOLD`.
 
-Policy evaluation consumes only backend-generated context, runs without model inference, and cannot transfer or reserve balances. Policy evaluation failure rolls back payment, risk, and policy rows. No DRUNIX call is made; a later milestone will consume the persisted policy output.
+Policy evaluation consumes only backend-generated context, runs without model inference, and cannot transfer or reserve balances. Policy evaluation failure rolls back payment, risk, and policy rows. When `DRUNIX_MODE=real`, the backend submits the selected lifecycle to the ledger and stores the returned terminal state in the existing payment row before committing. When DRUNIX is disabled, the payment remains `PENDING_RISK`. Neither path transfers or reserves simulated balances.

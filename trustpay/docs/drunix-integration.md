@@ -1,39 +1,46 @@
 # DRUNIX Integration
 
-## Existing verified environment
+## Verified environment
 
-The adjacent official NPCI DRUNIX v1.0.0 checkout and its Ubuntu 24.04 WSL2 test network are used on channel `mychannel`. The official `npcioss/drunix-ccenv:1.0` image is required by the network's peer builder configuration. The network is real; the chaincode and ledger are real. Payment participants and amounts remain synthetic.
+The live local test network uses channel `mychannel` and Fabric chaincode identifier `trustpay`. The verified definition is version `1.9`, sequence `10`, package `trustpay_1.9:112b1c49559d05e217fe4babc05f6112cf73ffcf28d9c3834646b2d17ac94789`. Org1 and Org2 installed and approved that package. Commit transaction `85c89946c40d54fff55fea0c62c4c433e23a71b253f46f0909f7372327c06f9b` was VALID in block 163.
 
-The official DRUNIX test network's `prereq` command installs Fabric-compatible CLI binaries and standard Fabric images; it does not obtain the DRUNIX-specific chaincode builder. The exact DRUNIX builder image must be present for lifecycle installation.
+Do not use the old version `1.6` / sequence `7` example from earlier project revisions. Sequence 9 reported version 1.8 but was bound to the old v1.7 package; sequence 10 is the corrected package. Query the full committing peers for the current definition before any future lifecycle change. This documentation does not authorize or perform an upgrade.
 
-## Deployment procedure
+In this network, `peer0` is configured as a lite peer and reports only block 0. The committing peers are `peer1` (ports 7061 and 9061); both reported height 178 and identical hashes during verification. Use the configured committing peers when assessing ledger height.
 
-From `../drunix/drunix-network/test-network`, with `../drunix/drunix-network/bin` on `PATH`:
+## SubmitPayment contract
 
-```bash
-./network.sh deployCC -c mychannel -ccn trustpay -ccp ../../../trustpay/chaincode/trustpay -ccl go -ccv 1.0 -ccs auto
-./network.sh cc list -org 1
-./network.sh cc list -org 2
+`SubmitPayment` arguments are, in order: transaction ID, sender ID, receiver ID, sender account ID, receiver account ID, amount minor units, sender initial balance minor units, receiver initial balance minor units, currency, risk score, risk level, and policy decision. Amount and balances are integer paise. For `APPROVE`, payment creation, risk/policy fields, sender debit, receiver credit, `COMPLETED` state, and four history entries are written in one Fabric transaction.
+
+Example synthetic invocation payload (use only through the trusted test-network CLI and authorized local identity):
+
+```json
+{"Args":["SubmitPayment","demo-001","sender-demo","receiver-demo","account-s-demo","account-r-demo","1200","10000","500","INR","0.12","LOW","APPROVE"]}
 ```
 
-Paths are relative to the test-network directory. Confirm both organizations report the committed chaincode name, version, and sequence before submitting transactions.
+Keyed queries are preferred for payment verification:
 
-Invoke and query requests use the test-network wrapper's JSON constructors, for example:
-
-```bash
-./network.sh cc invoke -c mychannel -ccn trustpay -ccic '{"Args":["CreatePayment","txn-001","user-001","merchant-001","2500","INR"]}'
-./network.sh cc query -c mychannel -ccn trustpay -ccqc '{"Args":["GetPayment","txn-001"]}'
-./network.sh cc query -c mychannel -ccn trustpay -ccqc '{"Args":["GetPaymentHistory","txn-001"]}'
+```json
+{"Args":["GetPayment","demo-001"]}
+{"Args":["GetPaymentHistory","demo-001"]}
+{"Args":["GetAccount","account-s-demo"]}
 ```
 
-`GetPaymentHistory` reads the chaincode's explicit append-only ledger records. Each successful state-changing function updates the payment and adds a history snapshot atomically; failed transitions do neither.
+Exact request replay is idempotent; the same ID with changed data is rejected. Insufficient ledger balance is rejected without account/payment writes. PostgreSQL is not used as an authoritative settlement lock. Competing transactions that read/write the same sender-account key are validated by Fabric MVCC.
 
-Run these commands in a Bash shell (Ubuntu WSL), quote the JSON as one shell argument, and inspect the exact peer command/output. Do not infer transaction IDs that the CLI does not print. Transaction function argument schemas are specified by the exported methods in the contract; this example illustrates the wrapper pattern and must be kept aligned with that schema.
+## Live evidence (2026-09-30)
 
-## Future FastAPI client choice
+- Basic `SubmitPayment`: VALID transaction `dc6fffa45ed2400255398359ee68a5a13032744260a27b9f4b965e759d9536e6` in block 164; final status `COMPLETED`, history sequences 1–4, sender 10,000 → 8,800 minor units, receiver 500 → 1,700.
+- Exact replay: VALID transaction `5c08d3ef463b946d20e9d51685546e34e149388e1b620ee7351b3da9e903b9e1` in block 168; no second debit/credit or history entry.
+- Concurrent double spend: block 170; one VALID (code 0), one `MVCC_READ_CONFLICT` (code 11); only one 7,000-unit spend from 10,000 committed, leaving 3,000.
+- Concurrent lifecycle conflict: block 177; one VALID approval, one `MVCC_READ_CONFLICT` (code 11); final status `APPROVED`.
 
-The official DRUNIX sample includes Fabric Gateway clients (including Go). The currently verified official client route is Gateway over gRPC using a network identity, private key, TLS certificate, and the channel/chaincode contract. There is no evidenced official Python DRUNIX Gateway SDK in this repository. The smallest real backend integration should therefore be a small Go Gateway sidecar/service using the official Gateway library, called by FastAPI over a narrow local API, or a carefully evaluated supported Fabric Gateway binding. Do not invent a Python DRUNIX API or silently fall back to a mock.
+The peer `querycommitted` definition and the peer block validation filter were both inspected. Endorsement success alone is not treated as a committed transaction.
+
+## Runtime and credentials
+
+`DRUNIX_MODE` defaults to `off`. Enable `real` only in a trusted local environment with the existing network running and configured. Mutations use the existing `Admin@org1.example.com` / `Admin@org2.example.com` X.509 operator identities. Protect those credentials as secrets; do not put them in source control or expose them to browser clients. The backend wrapper waits for commit events and then verifies payment and account keys; ambiguous outcomes are not blindly replayed.
 
 ## Limits
 
-The contract records policy/state, not payment settlement. No UPI/NPCI production rails or real funds are involved. The version-1 contract's amount representation is integer whole INR units.
+Participants and INR balances are synthetic. No UPI/NPCI production rail, external bank, gateway, or real money movement is implemented. Initial account creation can seed synthetic balances from the application projection; reconcile any pre-existing differences before wider rollout. `GetAllPayments` can fail response-schema validation when old records lack newer account/minor-amount fields; the payment flow uses keyed payment/account/history queries and does not call that list transaction.

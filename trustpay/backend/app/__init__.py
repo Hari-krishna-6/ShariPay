@@ -1,1 +1,1 @@
-"""TrustPay backend application package."""
+"""ShariPay backend application package."""

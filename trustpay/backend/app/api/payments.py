@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.api.auth import get_current_active_user
 from app.auth.security import normalize_email
 from app.database import get_db
+from app.drunix.exceptions import DrunixConflictError
 from app.drunix.service import DrunixClientError, DrunixPaymentClient
 from app.models.account import Account
 from app.models.audit_log import AuditLog
@@ -96,12 +97,100 @@ def _return_existing(db: Session, current_user: User, payment: Payment) -> JSONR
     return JSONResponse(status_code=status.HTTP_200_OK, content=_payment_json(payment))
 
 
-def _apply_drunix_final_status(payment: Payment, drunix_state: dict) -> None:
+def _reconcile_existing_payment(
+    db: Session,
+    payment: Payment,
+    drunix_client: DrunixPaymentClient,
+    sender_account: Account,
+    receiver_account: Account,
+) -> None:
+    if not drunix_client.is_enabled() or payment.status != "PENDING_RISK":
+        return
+    try:
+        ledger_payment = drunix_client.query_payment(payment.transaction_id)
+    except DrunixClientError as exc:
+        if "does not exist" in str(exc).lower():
+            return
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not verify the existing payment against DRUNIX",
+        ) from exc
+    if not isinstance(ledger_payment, dict) or ledger_payment.get("status") not in _DRUNIX_FINAL_PAYMENT_STATUSES:
+        return
+    try:
+        state = {
+            "status": "committed",
+            "data": ledger_payment,
+            "accounts": {
+                "sender": drunix_client.query_account(str(payment.sender_account_id)),
+                "receiver": drunix_client.query_account(str(payment.receiver_account_id)),
+            },
+        }
+        _apply_drunix_final_status(payment, state, sender_account, receiver_account)
+        db.commit()
+    except DrunixClientError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not reconcile the existing payment with DRUNIX state",
+        ) from exc
+
+
+def _apply_drunix_final_status(
+    payment: Payment,
+    drunix_state: dict,
+    sender_account: Account | None = None,
+    receiver_account: Account | None = None,
+) -> None:
+    if drunix_state.get("status") != "committed":
+        raise DrunixClientError("DRUNIX did not confirm a committed payment transaction")
     ledger_payment = drunix_state.get("data")
     final_status = ledger_payment.get("status") if isinstance(ledger_payment, dict) else None
     if final_status not in _DRUNIX_FINAL_PAYMENT_STATUSES:
         raise DrunixClientError("DRUNIX synchronization did not return a terminal payment status")
+    if isinstance(ledger_payment, dict):
+        expected = {
+            "transactionId": payment.transaction_id,
+            "senderId": str(payment.sender_user_id),
+            "receiverId": str(payment.receiver_user_id),
+            "senderAccountId": str(payment.sender_account_id),
+            "receiverAccountId": str(payment.receiver_account_id),
+            "amountMinor": int(payment.amount * 100),
+            "currency": payment.currency,
+        }
+        for field, value in expected.items():
+            if ledger_payment.get(field) != value:
+                raise DrunixClientError(f"DRUNIX payment identity mismatch for {field}")
+    decision = getattr(getattr(payment, "policy_result", None), "decision", None)
+    expected_status = {
+        "APPROVE": "COMPLETED",
+        "VERIFY": "VERIFICATION_REQUIRED",
+        "HOLD": "HELD",
+        "REJECT": "REJECTED",
+    }.get(decision)
+    if expected_status is not None and final_status != expected_status:
+        raise DrunixClientError("DRUNIX payment status does not match the recorded policy decision")
     payment.status = final_status
+    ledger_accounts = drunix_state.get("accounts")
+    if ledger_accounts is not None:
+        for role, account_id, account in (
+            ("sender", payment.sender_account_id, sender_account),
+            ("receiver", payment.receiver_account_id, receiver_account),
+        ):
+            if account is None:
+                raise DrunixClientError(f"DRUNIX {role} account projection is unavailable")
+            ledger_account = ledger_accounts.get(role)
+            if not isinstance(ledger_account, dict) or ledger_account.get("accountId") != str(account_id):
+                raise DrunixClientError(f"DRUNIX {role} account state is missing or mismatched")
+            if ledger_account.get("currency") != payment.currency:
+                raise DrunixClientError(f"DRUNIX {role} account currency does not match")
+            try:
+                balance_minor = ledger_account["balanceMinor"]
+                if isinstance(balance_minor, bool) or not isinstance(balance_minor, int) or balance_minor < 0:
+                    raise ValueError("balanceMinor must be a non-negative integer")
+                account.balance = Decimal(balance_minor) / 100
+            except (KeyError, ArithmeticError, TypeError, ValueError) as exc:
+                raise DrunixClientError(f"DRUNIX {role} account balance is invalid") from exc
 
 
 @router.post("", response_model=PaymentResponse, status_code=status.HTTP_201_CREATED)
@@ -178,6 +267,7 @@ def create_payment(
     )
     if existing is not None:
         if _same_request(existing, beneficiary, sender_account, receiver_account, payload):
+            _reconcile_existing_payment(db, existing, drunix_client, sender_account, receiver_account)
             return _return_existing(db, current_user, existing)
         _reject(db, current_user.id, "payment_idempotency_conflict", "key_reused_with_different_data", status.HTTP_409_CONFLICT, "Idempotency key was already used with different payment data")
 
@@ -265,33 +355,6 @@ def create_payment(
             "success",
             {"transaction_id": payment.transaction_id, "decision": policy_result.decision},
         )
-        try:
-            drunix_state = drunix_client.sync_payment(payment, risk_result, policy_result)
-            if drunix_state is not None:
-                _apply_drunix_final_status(payment, drunix_state)
-        except DrunixClientError as exc:
-            db.rollback()
-            logger.exception("Payment could not be synced with DRUNIX")
-            _audit(
-                db,
-                current_user.id,
-                "payment_drunix_sync",
-                "failed",
-                {"transaction_id": payment.transaction_id, "reason": str(exc)},
-            )
-            db.commit()
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Payment could not be synchronized with the DRUNIX ledger",
-            ) from exc
-        if drunix_state is not None:
-            _audit(
-                db,
-                current_user.id,
-                "payment_drunix_sync",
-                "success",
-                {"transaction_id": payment.transaction_id, "state": drunix_state.get("status")},
-            )
         db.commit()
     except (RiskAssessmentError, PolicyEvaluationError) as exc:
         db.rollback()
@@ -324,6 +387,58 @@ def create_payment(
         if existing is not None and _same_request(existing, beneficiary, sender_account, receiver_account, payload):
             return _return_existing(db, current_user, existing)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Payment could not be created")
+
+    if drunix_client.is_enabled():
+        try:
+            drunix_state = drunix_client.sync_payment(
+                payment,
+                risk_result,
+                policy_result,
+                sender_account,
+                receiver_account,
+            )
+            if drunix_state is None:
+                raise DrunixClientError("DRUNIX did not confirm the payment commit")
+            _apply_drunix_final_status(payment, drunix_state, sender_account, receiver_account)
+            _audit(
+                db,
+                current_user.id,
+                "payment_drunix_sync",
+                "success",
+                {"transaction_id": payment.transaction_id, "state": drunix_state.get("status")},
+            )
+            db.commit()
+        except DrunixConflictError as exc:
+            db.rollback()
+            payment.status = "FAILED"
+            db.add(payment)
+            _audit(
+                db,
+                current_user.id,
+                "payment_drunix_conflict",
+                "failed",
+                {"transaction_id": payment.transaction_id, "reason": str(exc)},
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Payment conflicted with a concurrent DRUNIX ledger update; retry with a new idempotency key",
+            ) from exc
+        except DrunixClientError as exc:
+            db.rollback()
+            logger.exception("Payment commit could not be confirmed by DRUNIX")
+            _audit(
+                db,
+                current_user.id,
+                "payment_drunix_sync",
+                "failed",
+                {"transaction_id": payment.transaction_id, "reason": str(exc)},
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Payment remains pending because its DRUNIX commit could not be confirmed",
+            ) from exc
 
     db.refresh(payment)
     return payment

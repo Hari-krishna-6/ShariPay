@@ -9,9 +9,9 @@ import (
 func main() {
 	chaincode, err := contractapi.NewChaincode(&PaymentContract{})
 	if err != nil {
-		log.Fatalf("create TrustPay chaincode: %v", err)
+		log.Fatalf("create ShariPay chaincode: %v", err)
 	}
 	if err := chaincode.Start(); err != nil {
-		log.Fatalf("start TrustPay chaincode: %v", err)
+		log.Fatalf("start ShariPay chaincode: %v", err)
 	}
 }

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
 import jwt
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -20,7 +22,8 @@ from app.models.beneficiary import Beneficiary
 from app.models.payment import Payment
 from app.models.risk_assessment import RiskAssessment
 from app.models.user import User
-from app.api.payments import get_policy_service, get_risk_assessment_service
+from app.api.payments import get_drunix_client, get_policy_service, get_risk_assessment_service
+from app.drunix.exceptions import DrunixConflictError
 from app.models.policy_decision import PolicyDecisionRecord
 from app.policy import PolicyEvaluationError
 from app.risk.service import RiskAssessmentService, clear_model_cache
@@ -83,7 +86,7 @@ def add_beneficiary(token: str, email: str) -> dict:
 def test_root_status() -> None:
     response = client.get("/")
     assert response.status_code == 200
-    assert response.json()["service"] == "TrustPay"
+    assert response.json()["service"] == "ShariPay"
 
 
 def test_health_status() -> None:
@@ -373,6 +376,123 @@ def test_payment_creation_is_idempotent_visible_to_parties_and_does_not_transfer
         assessment = db.query(RiskAssessment).filter(RiskAssessment.payment_id == stored.id).one()
         assert assessment.policy_decision is None
         assert assessment.risk_level == payment["risk_assessment"]["risk_level"]
+
+
+def test_drunix_mvcc_conflict_never_completes_or_debits_application_state() -> None:
+    reset_db()
+    sender_email, sender_token = register_and_login("mvcc_sender")
+    receiver_email, _ = register_and_login("mvcc_receiver")
+    beneficiary = add_beneficiary(sender_token, receiver_email)
+
+    class ConflictingDrunixClient:
+        def is_enabled(self):
+            return True
+
+        def sync_payment(self, *args):
+            raise DrunixConflictError("MVCC_READ_CONFLICT")
+
+    app.dependency_overrides[get_drunix_client] = lambda: ConflictingDrunixClient()
+    try:
+        response = client.post(
+            "/api/v1/payments",
+            json={
+                "beneficiary_id": beneficiary["id"],
+                "amount": "25.00",
+                "currency": "INR",
+                "idempotency_key": "mvcc-conflict-key",
+            },
+            headers=auth_headers(sender_token),
+        )
+    finally:
+        app.dependency_overrides.pop(get_drunix_client, None)
+
+    assert response.status_code == 409
+    with SessionLocal() as db:
+        sender = db.query(User).filter(User.email == sender_email).one()
+        payment = db.query(Payment).filter(Payment.sender_user_id == sender.id).one()
+        account = db.query(Account).filter(Account.user_id == sender.id).one()
+        assert payment.status == "FAILED"
+        assert account.balance == Decimal("100000.00")
+        conflict_audit = db.query(AuditLog).filter(AuditLog.event_type == "payment_drunix_conflict").one()
+        assert "MVCC_READ_CONFLICT" in conflict_audit.details["reason"]
+
+
+def test_distinct_idempotency_keys_allow_independent_identical_payments() -> None:
+    reset_db()
+    _, sender_token = register_and_login("independent_sender")
+    receiver_email, _ = register_and_login("independent_receiver")
+    beneficiary = add_beneficiary(sender_token, receiver_email)
+    base_payload = {
+        "beneficiary_id": beneficiary["id"],
+        "amount": "25.50",
+        "currency": "INR",
+    }
+
+    first = client.post(
+        "/api/v1/payments",
+        json={**base_payload, "idempotency_key": "independent-attempt-1"},
+        headers=auth_headers(sender_token),
+    )
+    second = client.post(
+        "/api/v1/payments",
+        json={**base_payload, "idempotency_key": "independent-attempt-2"},
+        headers=auth_headers(sender_token),
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["transaction_id"] != second.json()["transaction_id"]
+
+
+@pytest.mark.skipif(settings.DRUNIX_MODE.lower() != "real", reason="requires the deployed DRUNIX network and upgraded trustpay chaincode")
+def test_live_concurrent_payments_cannot_spend_the_same_balance() -> None:
+    reset_db()
+    _, sender_token = register_and_login("live_concurrent_sender")
+    first_receiver_email, _ = register_and_login("live_concurrent_receiver_1")
+    second_receiver_email, _ = register_and_login("live_concurrent_receiver_2")
+    first_beneficiary = add_beneficiary(sender_token, first_receiver_email)
+    second_beneficiary = add_beneficiary(sender_token, second_receiver_email)
+    with SessionLocal() as db:
+        sender = db.query(User).filter(User.email.like("live_concurrent_sender_%")).one()
+        account = db.query(Account).filter(Account.user_id == sender.id).one()
+        account.balance = Decimal("10000.00")
+        db.commit()
+
+    requests = [
+        {
+            "beneficiary_id": first_beneficiary["id"],
+            "amount": "8000.00",
+            "currency": "INR",
+            "idempotency_key": "live-concurrent-8000",
+        },
+        {
+            "beneficiary_id": second_beneficiary["id"],
+            "amount": "7000.00",
+            "currency": "INR",
+            "idempotency_key": "live-concurrent-7000",
+        },
+    ]
+
+    def submit(payload):
+        with TestClient(app) as concurrent_client:
+            return concurrent_client.post(
+                "/api/v1/payments",
+                json=payload,
+                headers=auth_headers(sender_token),
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(submit, requests))
+
+    assert sorted(response.status_code for response in responses) == [201, 409]
+    successful = next(response.json() for response in responses if response.status_code == 201)
+    assert successful["status"] == "COMPLETED"
+    with SessionLocal() as db:
+        sender = db.query(User).filter(User.email.like("live_concurrent_sender_%")).one()
+        account = db.query(Account).filter(Account.user_id == sender.id).one()
+        assert account.balance in {Decimal("2000.00"), Decimal("3000.00")}
+        payments = db.query(Payment).filter(Payment.sender_user_id == sender.id).all()
+        assert sum(payment.status == "COMPLETED" for payment in payments) == 1
 
 
 def test_payment_rejects_unauthenticated_invalid_currency_and_invalid_amounts() -> None:

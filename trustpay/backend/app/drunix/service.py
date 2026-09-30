@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from decimal import Decimal
 from typing import Any
 
 from app.config import settings
-from app.drunix.exceptions import DrunixClientError
-from app.drunix.schemas import DrunixInvocationResult
+from app.drunix.exceptions import DrunixClientError, DrunixConflictError
 
 
 class DrunixPaymentClient:
@@ -56,15 +56,37 @@ class DrunixPaymentClient:
     def is_enabled(self) -> bool:
         return self.enabled
 
-    def _contract_sequence_for(self, decision: str) -> list[str]:
-        normalized = decision.strip().upper()
-        mapping = {
+    @staticmethod
+    def _contract_sequence_for(policy_decision: str) -> list[str]:
+        sequence_by_decision = {
             "APPROVE": ["CreatePayment", "AssessRisk", "ApprovePayment", "CompletePayment"],
             "VERIFY": ["CreatePayment", "AssessRisk", "RequestVerification"],
             "HOLD": ["CreatePayment", "AssessRisk", "HoldPayment"],
             "REJECT": ["CreatePayment", "AssessRisk", "RejectPayment"],
         }
-        return mapping.get(normalized, ["CreatePayment", "AssessRisk", "RejectPayment"])
+        try:
+            return list(sequence_by_decision[policy_decision])
+        except KeyError as exc:
+            raise ValueError(f"Unsupported policy decision: {policy_decision}") from exc
+
+    @staticmethod
+    def _minor_units(amount: Decimal | str | int | float) -> int:
+        value = Decimal(str(amount)) * 100
+        if value != value.to_integral_value():
+            raise DrunixClientError("Payment amount cannot be represented in minor currency units")
+        return int(value)
+
+    @staticmethod
+    def _raise_invoke_error(function_name: str, message: str) -> None:
+        normalized = message.upper()
+        if (
+            "MVCC" in normalized
+            or "PHANTOM_READ_CONFLICT" in normalized
+            or "PHANTOM READ CONFLICT" in normalized
+            or "INSUFFICIENT LEDGER BALANCE" in normalized
+        ):
+            raise DrunixConflictError(f"DRUNIX rejected {function_name} because ledger state changed concurrently: {message}")
+        raise DrunixClientError(f"DRUNIX invoke failed for {function_name}: {message}")
 
     @staticmethod
     def _decode_response(output: str) -> Any:
@@ -100,9 +122,7 @@ class DrunixPaymentClient:
         )
         result = self._run_bash(command)
         if result.returncode != 0:
-            raise DrunixClientError(
-                f"DRUNIX invoke failed for {function_name}: {result.stderr.strip() or result.stdout.strip()}"
-            )
+            self._raise_invoke_error(function_name, result.stderr.strip() or result.stdout.strip())
         response = self._decode_response(result.stdout)
         if isinstance(response, dict) and response.get("status") == "ERROR":
             raise DrunixClientError(f"DRUNIX invoke returned an error for {function_name}: {response}")
@@ -136,7 +156,11 @@ class DrunixPaymentClient:
         transaction_id: str,
         sender_user_id: str,
         receiver_user_id: str,
-        amount: int | float | str,
+        sender_account_id: str,
+        receiver_account_id: str,
+        amount: Decimal | int | float | str,
+        sender_balance: Decimal | int | float | str,
+        receiver_balance: Decimal | int | float | str,
         currency: str,
         risk_score: float,
         risk_level: str,
@@ -144,25 +168,37 @@ class DrunixPaymentClient:
     ) -> dict[str, Any]:
         if not self.enabled:
             return {"status": "disabled"}
-        normalized_amount = int(amount)
-        sequence = self._contract_sequence_for(policy_decision)
-        call_chain: list[tuple[str, list[str]]] = [
-            ("CreatePayment", [transaction_id, sender_user_id, receiver_user_id, str(normalized_amount), currency]),
-            ("AssessRisk", [transaction_id, str(float(risk_score)), risk_level, policy_decision]),
+        args = [
+            transaction_id,
+            sender_user_id,
+            receiver_user_id,
+            sender_account_id,
+            receiver_account_id,
+            str(self._minor_units(amount)),
+            str(self._minor_units(sender_balance)),
+            str(self._minor_units(receiver_balance)),
+            currency,
+            str(float(risk_score)),
+            risk_level,
+            policy_decision,
         ]
-        for function_name in sequence[2:]:
-            call_chain.append((function_name, [transaction_id]))
-
-        results: list[DrunixInvocationResult] = []
-        for function_name, args in call_chain:
-            response = self._invoke(function_name, args)
-            results.append(DrunixInvocationResult(function=function_name, arguments=tuple(args), response=response))
-
+        self._invoke("SubmitPayment", args)
         latest = self.query_payment(transaction_id)
-        return {"status": "synced", "transaction_id": transaction_id, "data": latest, "calls": [result.function for result in results]}
+        sender = self.query_account(sender_account_id)
+        receiver = self.query_account(receiver_account_id)
+        return {
+            "status": "committed",
+            "transaction_id": transaction_id,
+            "data": latest,
+            "accounts": {"sender": sender, "receiver": receiver},
+            "calls": ["SubmitPayment"],
+        }
 
     def query_payment(self, transaction_id: str) -> dict[str, Any]:
         return self._query("GetPayment", [transaction_id])
+
+    def query_account(self, account_id: str) -> dict[str, Any]:
+        return self._query("GetAccount", [account_id])
 
     def query_payment_history(self, transaction_id: str) -> list[Any]:
         result = self._query("GetPaymentHistory", [transaction_id])
@@ -172,14 +208,25 @@ class DrunixPaymentClient:
             return result.get("data", [])
         return []
 
-    def sync_payment(self, payment: Any, risk_result: Any, policy_result: Any) -> dict[str, Any] | None:
+    def sync_payment(
+        self,
+        payment: Any,
+        risk_result: Any,
+        policy_result: Any,
+        sender_account: Any,
+        receiver_account: Any,
+    ) -> dict[str, Any] | None:
         if not self.enabled:
             return None
         return self.submit_payment(
             transaction_id=payment.transaction_id,
             sender_user_id=str(payment.sender_user_id),
             receiver_user_id=str(payment.receiver_user_id),
-            amount=int(payment.amount),
+            sender_account_id=str(sender_account.id),
+            receiver_account_id=str(receiver_account.id),
+            amount=payment.amount,
+            sender_balance=sender_account.balance,
+            receiver_balance=receiver_account.balance,
             currency=payment.currency,
             risk_score=float(risk_result.risk_score),
             risk_level=risk_result.risk_level,

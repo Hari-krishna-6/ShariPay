@@ -25,7 +25,7 @@ class RiskAssessment(Base):
     risk_score: Mapped[Decimal] = mapped_column(Numeric(7, 6), nullable=False)
     risk_level: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     policy_decision: Mapped[str] = mapped_column(String(32), nullable=True)
-    model_version: Mapped[str] = mapped_column(String(64), nullable=False, default="trustpay-ml-v1")
+    model_version: Mapped[str] = mapped_column(String(64), nullable=False, default="sharipay-ml-v1")
     features_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=True)
     risk_factors: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

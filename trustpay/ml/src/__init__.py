@@ -1,1 +1,1 @@
-"""TrustPay synthetic ML risk engine."""
+"""ShariPay synthetic ML risk engine."""

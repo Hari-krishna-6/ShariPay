@@ -1,1 +1,1 @@
-"""Authentication module for TrustPay backend."""
+"""Authentication module for ShariPay backend."""

@@ -1,6 +1,6 @@
-# TrustPay ML Risk Engine
+# ShariPay ML Risk Engine
 
-This is a prototype Random Forest risk model trained only on synthetic transactions. Its fraud probability is an input to a future backend policy layer; the model does not submit chaincode transactions or modify DRUNIX state.
+This is a prototype Random Forest risk model trained only on synthetic transactions. Its fraud probability is an input to the ShariPay backend policy layer; the model does not submit chaincode transactions or modify DRUNIX state.
 
 ## Environment and dependencies
 
@@ -40,7 +40,7 @@ Run inference with a JSON object containing the 15 named model features:
 python -m src.predict --model models/fraud_model.joblib --input transaction.json
 ```
 
-The trained artifact is `models/fraud_model.joblib`; the generated CSV and artifact are git-ignored and can be regenerated with the commands above.
+The trained artifact `models/fraud_model.joblib` is committed because the backend loads it for inference. Generated transaction CSV files are git-ignored. Regenerating training data or the artifact changes the model and is not part of normal application startup.
 
 ## Dataset assumptions
 
@@ -58,4 +58,4 @@ Risk thresholds are centralized in `src/config.py`: score `<0.30` LOW, `0.30–<
 
 ## Future integration
 
-The intended path is payment request → backend feature extraction → `predict_risk()` → policy decision → official DRUNIX Gateway client → TrustPay chaincode. This module has no direct database, FastAPI, Gateway, or blockchain dependency. It returns a probability and factors only; a later backend/policy layer decides the chaincode function to call.
+The implemented path is payment request → backend feature extraction → `RiskAssessmentService` / `predict_risk()` → deterministic policy decision → DRUNIX client → `trustpay` chaincode when `DRUNIX_MODE=real`. This module has no direct database, FastAPI, Gateway, or blockchain dependency. It returns a probability and rule factors only; the backend policy selects the decision.

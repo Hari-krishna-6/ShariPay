@@ -54,8 +54,6 @@ function checkCommitReadiness() {
   infoln "Checking the commit readiness of the chaincode definition on peer0.org${ORG} on channel '$CHANNEL_NAME'..."
   local rc=1
   local COUNTER=1
-  # continue to poll
-  # we either get a successful response, or reach MAX RETRY
   while [ $rc -ne 0 -a $COUNTER -lt $MAX_RETRY ]; do
     sleep $DELAY
     infoln "Attempting to check the commit readiness of the chaincode definition on peer0.org${ORG}, Retry after $DELAY seconds."
@@ -300,26 +298,13 @@ chaincodeInvoke() {
   CC_INVOKE_CONSTRUCTOR=$4
   
   infoln "Invoking on peer0.org${ORG} on channel '$CHANNEL_NAME'..."
-  local rc=1
-  local COUNTER=1
-  # continue to poll
-  # we either get a successful response, or reach MAX RETRY
-  while [ $rc -ne 0 -a $COUNTER -lt $MAX_RETRY ]; do
-    sleep $DELAY
-    infoln "Attempting to Invoke on peer0.org${ORG}, Retry after $DELAY seconds."
-    set -x
-    peer chaincode invoke -o localhost:7050 -C $CHANNEL_NAME -n ${CC_NAME} -c ${CC_INVOKE_CONSTRUCTOR} --tls --cafile $ORDERER_CA  --peerAddresses localhost:7051 --tlsRootCertFiles $PEER0_ORG1_CA --peerAddresses localhost:9051 --tlsRootCertFiles $PEER0_ORG2_CA  >&log.txt
-    res=$?
-    { set +x; } 2>/dev/null
-    let rc=$res
-    COUNTER=$(expr $COUNTER + 1)
-  done
+  set -x
+  peer chaincode invoke -o localhost:7050 -C $CHANNEL_NAME -n ${CC_NAME} -c ${CC_INVOKE_CONSTRUCTOR} --tls --cafile $ORDERER_CA --peerAddresses localhost:7051 --tlsRootCertFiles $PEER0_ORG1_CA --peerAddresses localhost:9051 --tlsRootCertFiles $PEER0_ORG2_CA --waitForEvent --waitForEventTimeout 60s >&log.txt
+  res=$?
+  { set +x; } 2>/dev/null
   cat log.txt
-  if test $rc -eq 0; then
-    successln "Invoke successful on peer0.org${ORG} on channel '$CHANNEL_NAME'"
-  else
-    fatalln "After $MAX_RETRY attempts, Invoke result on peer0.org${ORG} is INVALID!"
-  fi
+  verifyResult $res "Invoke or commit validation failed on peer0.org${ORG} on channel '$CHANNEL_NAME'"
+  successln "Invoke committed on peer0.org${ORG} on channel '$CHANNEL_NAME'"
 }
 
 chaincodeQuery() {

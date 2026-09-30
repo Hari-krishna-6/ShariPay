@@ -1,4 +1,4 @@
-"""Add authentication fields and refresh tokens for TrustPay users.
+"""Add authentication fields and refresh tokens for ShariPay users.
 
 Revision ID: 202409020000
 Revises: 202409010000

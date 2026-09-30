@@ -1,1 +1,1 @@
-"""API route package for the TrustPay backend."""
+"""API route package for the ShariPay backend."""

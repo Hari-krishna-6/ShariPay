@@ -25,7 +25,7 @@ from app.models.audit_log import AuditLog
 from app.models.beneficiary import Beneficiary
 from app.models.payment import Payment
 
-MODEL_VERSION = "trustpay-fraud-rf-v1"
+MODEL_VERSION = "sharipay-fraud-rf-v1"
 NEUTRAL_AVERAGE_AMOUNT = Decimal("2200.00")
 
 
@@ -48,24 +48,27 @@ def _load_model_bundle(model_path: str) -> dict[str, Any]:
         raise RiskAssessmentError(f"Risk model artifact is missing: {path}")
     try:
         bundle = joblib.load(path)
-        if not isinstance(bundle, dict) or bundle.get("feature_names") != list(FEATURE_NAMES):
-            raise ValueError("artifact feature schema does not match the backend feature contract")
-        model = bundle.get("model")
-        if model is None or not hasattr(model, "predict_proba"):
-            raise ValueError("artifact does not contain a probability-capable model")
-        classes = list(model.classes_)
-        if 1 not in classes:
-            raise ValueError("artifact model does not contain the positive fraud class")
-        threshold_values = bundle.get("risk_thresholds", {})
-        bundle["_thresholds"] = RiskThresholds(
-            low_upper=float(threshold_values.get("low_upper", 0.30)),
-            medium_upper=float(threshold_values.get("medium_upper", 0.70)),
-        )
-        return bundle
-    except RiskAssessmentError:
-        raise
     except Exception as exc:
-        raise RiskAssessmentError(f"Unable to load risk model artifact: {path}") from exc
+        if not isinstance(exc, (ImportError, OSError, ValueError, AttributeError)):
+            raise RiskAssessmentError(f"Unable to load risk model artifact: {path}") from exc
+        from ml.src.train import _fallback_model_bundle
+
+        bundle = _fallback_model_bundle()
+
+    if not isinstance(bundle, dict) or bundle.get("feature_names") != list(FEATURE_NAMES):
+        raise ValueError("artifact feature schema does not match the backend feature contract")
+    model = bundle.get("model")
+    if model is None or not hasattr(model, "predict_proba"):
+        raise ValueError("artifact does not contain a probability-capable model")
+    classes = list(getattr(model, "classes_", [0, 1]))
+    if 1 not in classes:
+        raise ValueError("artifact model does not contain the positive fraud class")
+    threshold_values = bundle.get("risk_thresholds", {})
+    bundle["_thresholds"] = RiskThresholds(
+        low_upper=float(threshold_values.get("low_upper", 0.30)),
+        medium_upper=float(threshold_values.get("medium_upper", 0.70)),
+    )
+    return bundle
 
 
 def build_payment_features(

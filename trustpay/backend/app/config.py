@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "TrustPay"
+    PROJECT_NAME: str = "ShariPay"
     APP_ENV: str = "development"
     DATABASE_URL: str = "postgresql+psycopg://trustpay:trustpay@localhost:5432/trustpay"
     DB_ECHO: bool = False

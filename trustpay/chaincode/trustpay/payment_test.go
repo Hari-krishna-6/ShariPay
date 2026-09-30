@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -8,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyperledger/fabric-chaincode-go/v2/pkg/cid"
 	"github.com/hyperledger/fabric-chaincode-go/v2/shim"
 	"github.com/hyperledger/fabric-contract-api-go/v2/contractapi"
 	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/queryresult"
@@ -17,11 +20,33 @@ import (
 
 type testContext struct {
 	contractapi.TransactionContextInterface
-	stub *memoryStub
+	stub     *memoryStub
+	identity cid.ClientIdentity
 }
 
 func (c *testContext) GetStub() shim.ChaincodeStubInterface {
 	return c.stub
+}
+
+func (c *testContext) GetClientIdentity() cid.ClientIdentity {
+	if c.identity != nil {
+		return c.identity
+	}
+	return testClientIdentity{mspID: "Org1MSP", commonName: "Admin@org1.example.com"}
+}
+
+type testClientIdentity struct {
+	cid.ClientIdentity
+	mspID      string
+	commonName string
+}
+
+func (i testClientIdentity) GetMSPID() (string, error) {
+	return i.mspID, nil
+}
+
+func (i testClientIdentity) GetX509Certificate() (*x509.Certificate, error) {
+	return &x509.Certificate{Subject: pkix.Name{CommonName: i.commonName}}, nil
 }
 
 type memoryStub struct {
@@ -149,6 +174,90 @@ func TestCreatePaymentValidationAndDuplicate(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestPaymentMutationRejectsNonOperatorIdentity(t *testing.T) {
+	ctx := newTestContext()
+	ctx.identity = testClientIdentity{mspID: "Org1MSP", commonName: "client@org1.example.com"}
+
+	_, err := (&PaymentContract{}).SubmitPayment(
+		ctx, "unauthorized", "sender", "receiver", "account-1", "account-2",
+		100, 1000, 0, "INR", 0.12, "LOW", "APPROVE",
+	)
+	require.EqualError(t, err, "payment mutation is restricted to the configured DRUNIX organization administrators")
+	require.Empty(t, ctx.stub.state)
+}
+
+func TestSubmitPaymentUsesLedgerBalanceAndIsIdempotentByTransactionID(t *testing.T) {
+	contract := &PaymentContract{}
+	ctx := newTestContext()
+	first, err := contract.SubmitPayment(
+		ctx, "transfer-1", "sender-1", "receiver-1", "account-1", "account-2",
+		800000, 1000000, 50000, "INR", 0.12, "LOW", "APPROVE",
+	)
+	require.NoError(t, err)
+	require.Equal(t, StatusCompleted, first.Status)
+	require.Equal(t, "8000.00", first.AmountDecimal)
+	require.Equal(t, int64(800000), first.AmountMinor)
+
+	sender, err := contract.GetAccount(ctx, "account-1")
+	require.NoError(t, err)
+	require.Equal(t, int64(200000), sender.BalanceMinor)
+	receiver, err := contract.GetAccount(ctx, "account-2")
+	require.NoError(t, err)
+	require.Equal(t, int64(850000), receiver.BalanceMinor)
+
+	history, err := contract.GetPaymentHistory(ctx, "transfer-1")
+	require.NoError(t, err)
+	require.Len(t, history, 4)
+	require.Equal(t, []PaymentStatus{StatusCreated, StatusRiskAssessed, StatusApproved, StatusCompleted}, []PaymentStatus{
+		history[0].Status, history[1].Status, history[2].Status, history[3].Status,
+	})
+	for index, entry := range history {
+		require.Equal(t, uint64(index+1), entry.Sequence)
+	}
+
+	replayed, err := contract.SubmitPayment(
+		ctx, "transfer-1", "sender-1", "receiver-1", "account-1", "account-2",
+		800000, 1000000, 50000, "INR", 0.12, "LOW", "APPROVE",
+	)
+	require.NoError(t, err)
+	require.Equal(t, StatusCompleted, replayed.Status)
+	history, err = contract.GetPaymentHistory(ctx, "transfer-1")
+	require.NoError(t, err)
+	require.Len(t, history, 4)
+
+	_, err = contract.SubmitPayment(
+		ctx, "transfer-2", "sender-1", "receiver-2", "account-1", "account-3",
+		700000, 1000000, 0, "INR", 0.12, "LOW", "APPROVE",
+	)
+	require.EqualError(t, err, "insufficient ledger balance")
+	sender, err = contract.GetAccount(ctx, "account-1")
+	require.NoError(t, err)
+	require.Equal(t, int64(200000), sender.BalanceMinor)
+
+	_, err = contract.SubmitPayment(
+		ctx, "transfer-1", "sender-1", "receiver-1", "account-1", "account-2",
+		700000, 1000000, 50000, "INR", 0.12, "LOW", "APPROVE",
+	)
+	require.EqualError(t, err, `payment "transfer-1" already exists with different payment data`)
+}
+
+func TestConflictingPaymentTransitionsCannotBothSucceed(t *testing.T) {
+	contract := &PaymentContract{}
+	ctx := newTestContext()
+	_, err := contract.CreatePayment(ctx, "transition-1", "sender", "receiver", 2500, "INR")
+	require.NoError(t, err)
+	_, err = contract.AssessRisk(ctx, "transition-1", 0.12, "LOW", "APPROVE")
+	require.NoError(t, err)
+	_, err = contract.ApprovePayment(ctx, "transition-1")
+	require.NoError(t, err)
+	_, err = contract.RejectPayment(ctx, "transition-1")
+	require.EqualError(t, err, "invalid payment state transition: APPROVED -> REJECTED")
+
+	current, err := contract.GetPayment(ctx, "transition-1")
+	require.NoError(t, err)
+	require.Equal(t, StatusApproved, current.Status)
 }
 
 func TestAssessRiskValidation(t *testing.T) {

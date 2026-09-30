@@ -1,4 +1,4 @@
-"""Initial schema for the TrustPay backend foundation.
+"""Initial schema for the ShariPay backend foundation.
 
 Revision ID: 202409010000
 Revises: 

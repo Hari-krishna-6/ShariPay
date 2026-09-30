@@ -1,3 +1,5 @@
 .env
 .env.*
 !.env.example
+# Generated test-network identities; the checked-in network scripts use organizations/ instead.
+drunix/drunix-network/test-network/crypto-config/

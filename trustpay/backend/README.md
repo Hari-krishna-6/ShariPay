@@ -1,63 +1,31 @@
-# TrustPay Backend
+# ShariPay Backend
 
-This directory contains the TrustPay application API, including authentication, simulated accounts, beneficiaries, and application-side payment requests.
+The FastAPI service provides registration/login, synthetic INR accounts, owner-scoped beneficiaries, risk/policy assessment, payment records, audit events, and an optional DRUNIX client. Product branding is ShariPay; the Fabric chaincode setting remains `trustpay` for ledger compatibility.
 
-Scope is intentionally limited to:
+## Payment behavior
 
-- PostgreSQL configuration via SQLAlchemy
-- Alembic migration scaffolding
-- FastAPI health endpoints
-- JWT authentication and refresh-token rotation
-- simulated INR accounts with a fixed demo balance created at registration
-- owner-scoped beneficiaries and application-side payment records
-- ML risk assessment on payment creation, persisted separately from payment state
-- deterministic policy evaluation persisted separately from ML risk results
-- user, device, risk-assessment, and audit-log domain models
+The application database stores users and payment projections. With `DRUNIX_MODE=off` (the safe default), payment requests remain `PENDING_RISK` and no ledger mutation occurs. With `DRUNIX_MODE=real`, the service sends one `SubmitPayment` invocation and projects the terminal chaincode state and ledger account balances after its commit wait and keyed queries confirm the result. Fabric, not PostgreSQL, serializes conflicting settlement writes. PostgreSQL does not lock ledger accounts or substitute for MVCC.
 
-Account balances are simulated demo values, not banking funds. Creating a payment validates the simulated balance and records a `CREATED` request; it does not transfer or reserve money.
+The application also stores simulated account balances for UI/API context. These are not bank balances or production funds. First-time ledger account initialization can seed a synthetic ledger balance; subsequent ledger account state is authoritative for settlement.
 
-The following remain intentionally out of scope:
+## Components
 
-- chaincode changes
-- frontend code
-- UPI, NPCI, external banks, and payment gateways
+- SQLAlchemy models and Alembic migrations for users, refresh tokens, accounts, beneficiaries, payments, risk/policy decisions, and audit logs.
+- JWT access tokens, hashed/rotated refresh tokens, password hashing, and owner-scoped API queries.
+- Random Forest probability from the committed `ml/models/fraud_model.joblib` artifact, cached for the process; requests do not train the model.
+- A deterministic policy engine that applies risk bands and hard rejection rules independently of ML inference.
+- `app/drunix/service.py`, which uses the existing local network wrapper and `mychannel`/`trustpay` configuration. Protect the local X.509 admin credentials; never expose them to users.
 
-## Local setup
+## Setup
 
-1. Copy the repo-level environment template and fill in the database values.
-2. Install dependencies:
+From this directory, create a virtual environment, install `requirements.txt`, copy `.env.example` to `.env`, and replace the development JWT secret before exposing the service. Start PostgreSQL with `docker compose up -d postgres`, then run `python -m alembic upgrade head` and `uvicorn app.main:app --reload`.
 
-   ```bash
-   pip install -r backend/requirements.txt
-   ```
+DRUNIX remains disabled unless explicitly enabled in the local environment. The sample environment values are development-only. No UPI/NPCI production rails, external bank APIs, frontend, or real money movement are implemented.
 
-3. Run Alembic migrations:
+## Validation
 
-   ```bash
-   cd backend
-   alembic upgrade head
-   ```
+Run the full backend suite from this directory with `python -m pytest -q`. Run the DRUNIX client/integration tests with `python -m pytest tests/test_drunix_integration.py -q`. These automated tests do not replace the separately documented live Fabric transaction/MVCC evidence.
 
-4. Start the app:
+## Known compatibility note
 
-   ```bash
-   uvicorn app.main:app --reload
-   ```
-
-## Application endpoints
-
-- `GET /api/v1/accounts` and `GET /api/v1/accounts/{account_id}` return only the authenticated user's simulated accounts.
-- `POST /api/v1/beneficiaries` and `GET /api/v1/beneficiaries` manage TrustPay-user beneficiaries.
-- `POST /api/v1/payments` validates and records a simulated payment request without moving balances.
-- `GET /api/v1/payments` and `GET /api/v1/payments/{transaction_id}` show only payments where the authenticated user is sender or receiver.
-- Payment responses include server-generated ML and policy results; clients cannot set either result.
-
-## ML risk integration
-
-Payment creation loads the existing `ml/models/fraud_model.joblib` artifact on first use and caches it for the application process. Override the path with `ML_MODEL_PATH` when deploying the backend separately from the repository layout. The backend reuses `ml/src/features.py` for validation and canonical feature order, and `ml/src/predict.py` risk-factor and threshold functions; it does not train or regenerate data at startup or during requests.
-
-Amount, time, account age, new-beneficiary status, payment frequency/velocity, average historical payment amount, deviation, and failed payment-attempt audits are derived from application records. The model currently has no device or location context, and no adjudicated fraud history exists, so `is_new_device`, `is_location_change`, and `previous_fraud_count` use deterministic zero values. A new account with no payment history uses a documented neutral historical average of INR 2,200.00; later assessments use the sender's observed prior payment average.
-
-Risk score, level, and rule-based factors are stored in `risk_assessments`; policy decision, reason, version, and triggered rules are stored separately in `policy_decisions`. Both results are returned only to the payment sender and receiver. LOW risk maps to `APPROVE`, MEDIUM to `VERIFY`, and HIGH to `HOLD`. Inactive parties/accounts, self-payment, invalid or insufficient amounts, excessive failed attempts, invalid lifecycle status, or inconsistent risk metadata map to `REJECT`. Prior-fraud history and repeated failures can escalate to `HOLD`.
-
-Policy evaluation consumes only backend-generated context, runs without model inference, and cannot transfer or reserve balances. Policy evaluation failure rolls back payment, risk, and policy rows. When `DRUNIX_MODE=real`, the backend submits the selected lifecycle to the ledger and stores the returned terminal state in the existing payment row before committing. When DRUNIX is disabled, the payment remains `PENDING_RISK`. Neither path transfers or reserves simulated balances.
+Legacy records without the new account/minor-amount fields can make the chaincode `GetAllPayments` response fail schema validation. The backend uses keyed payment/account/history queries for its payment flow; no backend code path calls `GetAllPayments`. This is documented rather than triggering an additional chaincode lifecycle upgrade.

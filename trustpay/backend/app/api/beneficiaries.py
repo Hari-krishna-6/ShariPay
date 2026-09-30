@@ -38,7 +38,7 @@ def create_beneficiary(
     if receiver is None:
         _audit(db, current_user.id, "beneficiary_create", "failed", {"reason": "recipient_unavailable"})
         db.commit()
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TrustPay user not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ShariPay user not found")
     if receiver.id == current_user.id:
         _audit(db, current_user.id, "beneficiary_create", "failed", {"reason": "self_beneficiary"})
         db.commit()

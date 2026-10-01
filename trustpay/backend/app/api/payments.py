@@ -476,7 +476,14 @@ def get_payment_drunix(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
     if not drunix_client.is_enabled():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DRUNIX integration is disabled")
-    return drunix_client.query_payment(transaction_id)
+    try:
+        return drunix_client.query_payment(transaction_id)
+    except DrunixClientError as exc:
+        logger.warning("DRUNIX payment detail query failed for %s: %s", transaction_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DRUNIX payment details are temporarily unavailable",
+        ) from exc
 
 
 @router.get("/{transaction_id}/drunix/history")
@@ -498,7 +505,15 @@ def get_payment_drunix_history(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
     if not drunix_client.is_enabled():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DRUNIX integration is disabled")
-    return {"transaction_id": transaction_id, "history": drunix_client.query_payment_history(transaction_id)}
+    try:
+        history = drunix_client.query_payment_history(transaction_id)
+    except DrunixClientError as exc:
+        logger.warning("DRUNIX payment history query failed for %s: %s", transaction_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DRUNIX payment history is temporarily unavailable",
+        ) from exc
+    return {"transaction_id": transaction_id, "history": history}
 
 
 @router.get("/{transaction_id}", response_model=PaymentResponse)

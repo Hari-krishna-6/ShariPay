@@ -1,4 +1,5 @@
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api/v1').replace(/\/$/, '')
+const API_REQUEST_TIMEOUT_MS = 140_000
 const ACCESS_TOKEN_KEY = 'sharipay.accessToken'
 const REFRESH_TOKEN_KEY = 'sharipay.refreshToken'
 let refreshPromise = null
@@ -19,14 +20,26 @@ const readError = async response => {
 
 async function send(path, { method = 'GET', body, authenticated = false } = {}) {
   const token = sessionStorage.getItem(ACCESS_TOKEN_KEY)
-  return fetch(`${API_BASE_URL}${path}`, {
-    method,
-    headers: {
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-      ...(authenticated && token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  })
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS)
+  try {
+    return await fetch(`${API_BASE_URL}${path}`, {
+      method,
+      headers: {
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+        ...(authenticated && token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: controller.signal,
+    })
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new ApiError('The backend request timed out. Check transaction history before retrying.', 408)
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 async function request(path, options = {}, canRefresh = true) {

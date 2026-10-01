@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import shlex
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -226,7 +227,7 @@ def test_drunix_explicit_mvcc_failure_is_a_conflict() -> None:
         stdout = ""
         stderr = "transaction invalidated: MVCC_READ_CONFLICT"
 
-    client._run_bash = lambda command: FailedCommand()
+    client._run_bash = lambda command, **kwargs: FailedCommand()
     with pytest.raises(DrunixConflictError, match="concurrently"):
         client._invoke("SubmitPayment", ["tx"])
 
@@ -240,9 +241,23 @@ def test_drunix_invoke_error_keeps_peer_output_when_stderr_has_shell_trace() -> 
         stdout = "Error: endorsement failed: peer unavailable"
         stderr = "+ peer chaincode invoke -o localhost:7050 ..."
 
-    client._run_bash = lambda command: FailedCommand()
+    client._run_bash = lambda command, **kwargs: FailedCommand()
     with pytest.raises(DrunixClientError, match="peer unavailable"):
         client._invoke("SubmitPayment", ["tx"])
+
+
+def test_drunix_subprocess_timeout_becomes_a_client_error(monkeypatch) -> None:
+    client = DrunixPaymentClient(network_path="/tmp/test-network")
+
+    def timed_out(command, **kwargs):
+        assert kwargs["timeout"] == 20
+        raise subprocess.TimeoutExpired(command, 20, output=b"partial stdout", stderr=b"partial stderr")
+
+    monkeypatch.setattr("app.drunix.service.subprocess.run", timed_out)
+    with pytest.raises(DrunixClientError, match="timed out after 20s") as error:
+        client._run_bash("peer chaincode query", timeout_seconds=20)
+    assert "partial stdout" in str(error.value)
+    assert "partial stderr" in str(error.value)
 
 
 @pytest.mark.parametrize("status", PAYMENT_STATUSES)
@@ -424,15 +439,20 @@ def test_drunix_subprocess_prepends_configured_peer_cli_for_invoke_and_query(mon
     assert len(calls) == 2
     for command, kwargs in calls:
         assert command[:2] == ["bash", "-lc"]
-        assert command[2].startswith('export PATH=/mnt/drunix-network/bin:"$PATH" && ')
+        assert command[2].startswith('export DRUNIX_WAIT_FOR_EVENT_TIMEOUT=10s && export PATH=/mnt/drunix-network/bin:"$PATH" && ')
         assert kwargs["capture_output"] is True
         assert kwargs["text"] is True
         assert kwargs["check"] is False
+        assert kwargs["timeout"] in {20, 30}
         assert "DRUNIX_LOG_FILE" in kwargs["env"]
         assert kwargs["env"]["DRUNIX_LOG_FILE"].startswith("/mnt/")
         assert f'export DRUNIX_LOG_FILE={shlex.quote(kwargs["env"]["DRUNIX_LOG_FILE"])} && ' in command[2]
     assert "./network.sh cc invoke" in calls[0][0][2]
     assert "./network.sh cc query" in calls[1][0][2]
+    assert calls[0][1]["env"]["DRUNIX_WAIT_FOR_EVENT_TIMEOUT"] == "10s"
+    assert "export DRUNIX_WAIT_FOR_EVENT_TIMEOUT=10s && " in calls[0][0][2]
+    assert calls[0][1]["timeout"] == 30
+    assert calls[1][1]["timeout"] == 20
 
 
 def test_concurrent_drunix_queries_keep_responses_isolated(monkeypatch) -> None:

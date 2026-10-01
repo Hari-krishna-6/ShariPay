@@ -339,7 +339,7 @@ chaincodeInvoke() {
   
   infoln "Invoking on peer0.org${ORG} on channel '$CHANNEL_NAME'..."
   set -x
-  peer chaincode invoke -o localhost:7050 -C $CHANNEL_NAME -n ${CC_NAME} -c ${CC_INVOKE_CONSTRUCTOR} --tls --cafile $ORDERER_CA --peerAddresses localhost:7051 --tlsRootCertFiles $PEER0_ORG1_CA --peerAddresses localhost:9051 --tlsRootCertFiles $PEER0_ORG2_CA --waitForEvent --waitForEventTimeout 60s >&"$log_file"
+  peer chaincode invoke -o localhost:7050 -C $CHANNEL_NAME -n ${CC_NAME} -c ${CC_INVOKE_CONSTRUCTOR} --tls --cafile $ORDERER_CA --peerAddresses localhost:7051 --tlsRootCertFiles $PEER0_ORG1_CA --peerAddresses localhost:9051 --tlsRootCertFiles $PEER0_ORG2_CA --waitForEvent --waitForEventTimeout "${DRUNIX_WAIT_FOR_EVENT_TIMEOUT:-60s}" >&"$log_file"
   res=$?
   { set +x; } 2>/dev/null
   cat "$log_file"

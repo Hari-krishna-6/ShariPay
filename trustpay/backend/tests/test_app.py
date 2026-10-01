@@ -23,7 +23,7 @@ from app.models.payment import Payment
 from app.models.risk_assessment import RiskAssessment
 from app.models.user import User
 from app.api.payments import get_drunix_client, get_policy_service, get_risk_assessment_service
-from app.drunix.exceptions import DrunixConflictError
+from app.drunix.exceptions import DrunixClientError, DrunixConflictError
 from app.models.policy_decision import PolicyDecisionRecord
 from app.policy import PolicyEvaluationError
 from app.risk.service import RiskAssessmentService, clear_model_cache
@@ -415,6 +415,62 @@ def test_drunix_mvcc_conflict_never_completes_or_debits_application_state() -> N
         assert account.balance == Decimal("100000.00")
         conflict_audit = db.query(AuditLog).filter(AuditLog.event_type == "payment_drunix_conflict").one()
         assert "MVCC_READ_CONFLICT" in conflict_audit.details["reason"]
+
+
+def test_drunix_detail_and_history_query_errors_return_503() -> None:
+    reset_db()
+    _, sender_token = register_and_login("drunix_read_failure_sender")
+    receiver_email, _ = register_and_login("drunix_read_failure_receiver")
+    beneficiary = add_beneficiary(sender_token, receiver_email)
+
+    class DisabledClient:
+        def is_enabled(self):
+            return False
+
+    app.dependency_overrides[get_drunix_client] = lambda: DisabledClient()
+    try:
+        created = client.post(
+            "/api/v1/payments",
+            json={
+                "beneficiary_id": beneficiary["id"],
+                "amount": "1.25",
+                "currency": "INR",
+                "idempotency_key": "drunix-read-failure",
+            },
+            headers=auth_headers(sender_token),
+        )
+    finally:
+        app.dependency_overrides.pop(get_drunix_client, None)
+    assert created.status_code == 201
+    transaction_id = created.json()["transaction_id"]
+
+    class FailingQueryClient:
+        def is_enabled(self):
+            return True
+
+        def query_payment(self, _transaction_id):
+            raise DrunixClientError("DRUNIX query timed out")
+
+        def query_payment_history(self, _transaction_id):
+            raise DrunixClientError("DRUNIX history query timed out")
+
+    app.dependency_overrides[get_drunix_client] = lambda: FailingQueryClient()
+    try:
+        detail = client.get(
+            f"/api/v1/payments/{transaction_id}/drunix",
+            headers=auth_headers(sender_token),
+        )
+        history = client.get(
+            f"/api/v1/payments/{transaction_id}/drunix/history",
+            headers=auth_headers(sender_token),
+        )
+    finally:
+        app.dependency_overrides.pop(get_drunix_client, None)
+
+    assert detail.status_code == 503
+    assert detail.json()["detail"] == "DRUNIX payment details are temporarily unavailable"
+    assert history.status_code == 503
+    assert history.json()["detail"] == "DRUNIX payment history is temporarily unavailable"
 
 
 def test_distinct_idempotency_keys_allow_independent_identical_payments() -> None:
@@ -930,10 +986,11 @@ def test_drunix_subprocess_prepends_configured_peer_cli_for_invoke_and_query(mon
     assert len(calls) == 2
     for command, kwargs in calls:
         assert command[:2] == ["bash", "-lc"]
-        assert command[2].startswith('export PATH=/mnt/drunix-network/bin:"$PATH" && ')
+        assert command[2].startswith('export DRUNIX_WAIT_FOR_EVENT_TIMEOUT=10s && export PATH=/mnt/drunix-network/bin:"$PATH" && ')
         assert kwargs["capture_output"] is True
         assert kwargs["text"] is True
         assert kwargs["check"] is False
+        assert kwargs["timeout"] in {20, 30}
         assert "DRUNIX_LOG_FILE" in kwargs["env"]
     assert "./network.sh cc invoke" in calls[0][0][2]
     assert "./network.sh cc query" in calls[1][0][2]

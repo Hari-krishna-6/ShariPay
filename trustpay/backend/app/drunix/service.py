@@ -12,6 +12,10 @@ from typing import Any
 from app.config import settings
 from app.drunix.exceptions import DrunixClientError, DrunixConflictError
 
+DRUNIX_INVOKE_TIMEOUT_SECONDS = 30
+DRUNIX_QUERY_TIMEOUT_SECONDS = 20
+DRUNIX_WAIT_FOR_EVENT_TIMEOUT = "10s"
+
 
 class DrunixPaymentClient:
     def __init__(
@@ -52,22 +56,38 @@ class DrunixPaymentClient:
     def _bash_peer_cli_path(self) -> str:
         return self._to_wsl_path(self.network_path.parent / "bin")
 
-    def _run_bash(self, command: str) -> subprocess.CompletedProcess[str]:
-        with tempfile.TemporaryDirectory(prefix="trustpay-drunix-") as temp_dir:
-            host_log_path = Path(temp_dir) / "command.log"
-            environment = os.environ.copy()
-            environment["DRUNIX_LOG_FILE"] = self._to_wsl_path(host_log_path)
-            shell_command = (
-                f'export PATH={shlex.quote(self._bash_peer_cli_path())}:"$PATH" && '
-                f'export DRUNIX_LOG_FILE={shlex.quote(environment["DRUNIX_LOG_FILE"])} && {command}'
-            )
-            return subprocess.run(
-                ["bash", "-lc", shell_command],
-                capture_output=True,
-                text=True,
-                check=False,
-                env=environment,
-            )
+    def _run_bash(self, command: str, *, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+        try:
+            with tempfile.TemporaryDirectory(prefix="trustpay-drunix-") as temp_dir:
+                host_log_path = Path(temp_dir) / "command.log"
+                environment = os.environ.copy()
+                environment["DRUNIX_LOG_FILE"] = self._to_wsl_path(host_log_path)
+                environment["DRUNIX_WAIT_FOR_EVENT_TIMEOUT"] = DRUNIX_WAIT_FOR_EVENT_TIMEOUT
+                shell_command = (
+                    f'export DRUNIX_WAIT_FOR_EVENT_TIMEOUT={DRUNIX_WAIT_FOR_EVENT_TIMEOUT} && '
+                    f'export PATH={shlex.quote(self._bash_peer_cli_path())}:"$PATH" && '
+                    f'export DRUNIX_LOG_FILE={shlex.quote(environment["DRUNIX_LOG_FILE"])} && {command}'
+                )
+                return subprocess.run(
+                    ["bash", "-lc", shell_command],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=environment,
+                    timeout=timeout_seconds,
+                )
+        except subprocess.TimeoutExpired as exc:
+            output = []
+            for stream in (exc.stdout, exc.stderr):
+                if isinstance(stream, bytes):
+                    stream = stream.decode(errors="replace")
+                if stream:
+                    output.append(stream.strip())
+            detail = "\n".join(output)
+            message = f"DRUNIX command timed out after {timeout_seconds}s"
+            if detail:
+                message = f"{message}: {detail}"
+            raise DrunixClientError(message) from exc
 
     def is_enabled(self) -> bool:
         return self.enabled
@@ -140,7 +160,7 @@ class DrunixPaymentClient:
             chaincode=shlex.quote(self.chaincode),
             payload=shlex.quote(json.dumps(payload, separators=(",", ":"))),
         )
-        result = self._run_bash(command)
+        result = self._run_bash(command, timeout_seconds=DRUNIX_INVOKE_TIMEOUT_SECONDS)
         if result.returncode != 0:
             self._raise_invoke_error(function_name, self._command_output(result))
         response = self._decode_response(result.stdout)
@@ -161,7 +181,7 @@ class DrunixPaymentClient:
             chaincode=shlex.quote(self.chaincode),
             payload=shlex.quote(json.dumps(payload, separators=(",", ":"))),
         )
-        result = self._run_bash(command)
+        result = self._run_bash(command, timeout_seconds=DRUNIX_QUERY_TIMEOUT_SECONDS)
         if result.returncode != 0:
             raise DrunixClientError(
                 f"DRUNIX query failed for {function_name}: {self._command_output(result)}"

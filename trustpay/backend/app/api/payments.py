@@ -461,9 +461,19 @@ def list_payments(
 def get_payment_drunix(
     transaction_id: str,
     current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
     drunix_client: DrunixPaymentClient = Depends(get_drunix_client),
 ) -> dict:
-    _ = current_user
+    payment = (
+        db.query(Payment)
+        .filter(
+            Payment.transaction_id == transaction_id,
+            or_(Payment.sender_user_id == current_user.id, Payment.receiver_user_id == current_user.id),
+        )
+        .first()
+    )
+    if payment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
     if not drunix_client.is_enabled():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DRUNIX integration is disabled")
     return drunix_client.query_payment(transaction_id)
@@ -473,9 +483,19 @@ def get_payment_drunix(
 def get_payment_drunix_history(
     transaction_id: str,
     current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
     drunix_client: DrunixPaymentClient = Depends(get_drunix_client),
 ) -> dict:
-    _ = current_user
+    payment = (
+        db.query(Payment)
+        .filter(
+            Payment.transaction_id == transaction_id,
+            or_(Payment.sender_user_id == current_user.id, Payment.receiver_user_id == current_user.id),
+        )
+        .first()
+    )
+    if payment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
     if not drunix_client.is_enabled():
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="DRUNIX integration is disabled")
     return {"transaction_id": transaction_id, "history": drunix_client.query_payment_history(transaction_id)}

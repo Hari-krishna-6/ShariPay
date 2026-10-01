@@ -1,0 +1,8 @@
+import { useEffect, useState } from 'react'
+import { Check, X, LoaderCircle, ShieldCheck, Undo2 } from 'lucide-react'
+import './reactbits.css'
+export function StrokeText({ text, className='' }) { return <div className={`stroke-text ${className}`} aria-label={text}><span>{text}</span></div> }
+export function BorderGlow({ children, className='' }) { return <div className={`border-glow-card ${className}`}><span className="edge-light"/><div className="border-glow-inner">{children}</div></div> }
+export function StatusMark({ status='pending', label, size=20 }) { const Icon=status==='done'?Check:status==='failed'||status==='cancelled'?X:status==='running'?LoaderCircle:ShieldCheck; return <span className={`status-mark ${status}`}><Icon size={size}/>{label&&<span>{label}</span>}</span> }
+export function FuseButton({ label='Confirm payment', undoLabel='Cancel', doneLabel='Confirmed', onCommit, disabled=false, className='' }) { const [phase,setPhase]=useState('idle'); useEffect(()=>{if(phase==='armed'){const id=setTimeout(()=>{setPhase('settled');onCommit?.()},900);return()=>clearTimeout(id)}},[phase,onCommit]); return <button className={`fuse-button ${className} ${phase}`} disabled={disabled||phase==='settled'} onClick={()=>setPhase(phase==='idle'?'armed':'idle')}>{phase==='idle'&&<><ShieldCheck size={17}/>{label}</>}{phase==='armed'&&<><Undo2 size={17}/>{undoLabel}<i/></>}{phase==='settled'&&<><Check size={17}/>{doneLabel}</>}</button> }
+export function SwipeToast({ title, description, open, onClose }) { if(!open)return null; return <div className="swipe-toast" role="status"><div><Check size={18}/><section><strong>{title}</strong><span>{description}</span></section><button onClick={onClose}>×</button></div><i/></div> }

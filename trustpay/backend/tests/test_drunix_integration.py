@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import shlex
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -148,6 +151,72 @@ def test_drunix_submission_is_one_atomic_minor_unit_invocation() -> None:
     assert result["status"] == "committed"
 
 
+def test_drunix_submission_recovers_only_a_matching_committed_payment() -> None:
+    client = DrunixPaymentClient(network_path="/tmp/test-network")
+    client.enabled = True
+    ledger_payment = {
+        "transactionId": "TPAY-AMBIGUOUS",
+        "senderId": "sender-1",
+        "receiverId": "receiver-1",
+        "senderAccountId": "account-1",
+        "receiverAccountId": "account-2",
+        "amountMinor": 2550,
+        "currency": "INR",
+        "riskScore": 0.12,
+        "riskLevel": "LOW",
+        "policyDecision": "APPROVE",
+        "status": "COMPLETED",
+    }
+    client._invoke = lambda function_name, args: (_ for _ in ()).throw(
+        DrunixClientError("timed out waiting for txid on all peers")
+    )
+    client.query_payment = lambda transaction_id: ledger_payment
+    client.query_account = lambda account_id: {"accountId": account_id, "balanceMinor": 0, "currency": "INR"}
+
+    result = client.submit_payment(
+        transaction_id="TPAY-AMBIGUOUS",
+        sender_user_id="sender-1",
+        receiver_user_id="receiver-1",
+        sender_account_id="account-1",
+        receiver_account_id="account-2",
+        amount=Decimal("25.50"),
+        sender_balance=Decimal("100.00"),
+        receiver_balance=Decimal("10.25"),
+        currency="INR",
+        risk_score=0.12,
+        risk_level="LOW",
+        policy_decision="APPROVE",
+    )
+
+    assert result["status"] == "committed"
+    assert result["data"] is ledger_payment
+
+
+def test_drunix_submission_does_not_recover_a_mismatched_ledger_payment() -> None:
+    client = DrunixPaymentClient(network_path="/tmp/test-network")
+    client.enabled = True
+    client._invoke = lambda function_name, args: (_ for _ in ()).throw(
+        DrunixClientError("timed out waiting for txid on all peers")
+    )
+    client.query_payment = lambda transaction_id: {"transactionId": transaction_id, "status": "COMPLETED"}
+
+    with pytest.raises(DrunixClientError, match="timed out waiting for txid"):
+        client.submit_payment(
+            transaction_id="TPAY-MISMATCHED",
+            sender_user_id="sender-1",
+            receiver_user_id="receiver-1",
+            sender_account_id="account-1",
+            receiver_account_id="account-2",
+            amount=Decimal("25.50"),
+            sender_balance=Decimal("100.00"),
+            receiver_balance=Decimal("10.25"),
+            currency="INR",
+            risk_score=0.12,
+            risk_level="LOW",
+            policy_decision="APPROVE",
+        )
+
+
 def test_drunix_explicit_mvcc_failure_is_a_conflict() -> None:
     client = DrunixPaymentClient(network_path="/tmp/test-network")
     client.enabled = True
@@ -159,6 +228,20 @@ def test_drunix_explicit_mvcc_failure_is_a_conflict() -> None:
 
     client._run_bash = lambda command: FailedCommand()
     with pytest.raises(DrunixConflictError, match="concurrently"):
+        client._invoke("SubmitPayment", ["tx"])
+
+
+def test_drunix_invoke_error_keeps_peer_output_when_stderr_has_shell_trace() -> None:
+    client = DrunixPaymentClient(network_path="/tmp/test-network")
+    client.enabled = True
+
+    class FailedCommand:
+        returncode = 1
+        stdout = "Error: endorsement failed: peer unavailable"
+        stderr = "+ peer chaincode invoke -o localhost:7050 ..."
+
+    client._run_bash = lambda command: FailedCommand()
+    with pytest.raises(DrunixClientError, match="peer unavailable"):
         client._invoke("SubmitPayment", ["tx"])
 
 
@@ -339,10 +422,79 @@ def test_drunix_subprocess_prepends_configured_peer_cli_for_invoke_and_query(mon
     client._query("GetPayment", ["tx-1"])
 
     assert len(calls) == 2
-    expected_prefix = 'export PATH="/mnt/drunix-network/bin:$PATH" && '
     for command, kwargs in calls:
         assert command[:2] == ["bash", "-lc"]
-        assert command[2].startswith(expected_prefix)
-        assert kwargs == {"capture_output": True, "text": True, "check": False}
+        assert command[2].startswith('export PATH=/mnt/drunix-network/bin:"$PATH" && ')
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["check"] is False
+        assert "DRUNIX_LOG_FILE" in kwargs["env"]
+        assert kwargs["env"]["DRUNIX_LOG_FILE"].startswith("/mnt/")
+        assert f'export DRUNIX_LOG_FILE={shlex.quote(kwargs["env"]["DRUNIX_LOG_FILE"])} && ' in command[2]
     assert "./network.sh cc invoke" in calls[0][0][2]
     assert "./network.sh cc query" in calls[1][0][2]
+
+
+def test_concurrent_drunix_queries_keep_responses_isolated(monkeypatch) -> None:
+    client = DrunixPaymentClient(network_path="/mnt/drunix-network/test-network")
+    client.enabled = True
+    transaction_id = "TPAY-CONCURRENT-QUERY"
+    account_id = "account-concurrent"
+    payment = {"transactionId": transaction_id, "status": "COMPLETED"}
+    history = [{"transactionId": transaction_id, "sequence": 4, "status": "COMPLETED"}]
+    ledger = {"accountId": account_id, "balanceMinor": 12500, "currency": "INR"}
+    log_paths = set()
+    log_values = {}
+    log_lock = threading.Lock()
+
+    def fake_run(command, **kwargs):
+        command_text = command[2]
+        if '"GetPaymentHistory"' in command_text:
+            response = history
+        elif '"GetAccount"' in command_text:
+            response = ledger
+        else:
+            response = payment
+
+        log_path = kwargs["env"]["DRUNIX_LOG_FILE"]
+        with log_lock:
+            log_paths.add(log_path)
+        rendezvous.wait(timeout=5)
+        with log_lock:
+            log_values[log_path] = json.dumps(response)
+        rendezvous.wait(timeout=5)
+        return SimpleNamespace(returncode=0, stdout=f"query output:\n{log_values[log_path]}\n", stderr="")
+
+    monkeypatch.setattr("app.drunix.service.subprocess.run", fake_run)
+
+    for _ in range(10):
+        rendezvous = threading.Barrier(3)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            payment_query = executor.submit(client.query_payment, transaction_id)
+            history_query = executor.submit(client.query_payment_history, transaction_id)
+            ledger_query = executor.submit(client.query_account, account_id)
+
+            assert payment_query.result(timeout=10) == payment
+            assert history_query.result(timeout=10) == history
+            assert ledger_query.result(timeout=10) == ledger
+
+    assert len(log_paths) == 30
+
+
+def test_drunix_query_quotes_payload_as_a_single_shell_argument(monkeypatch) -> None:
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command[2])
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("app.drunix.service.subprocess.run", fake_run)
+    client = DrunixPaymentClient(network_path="/mnt/drunix-network/test-network")
+    client.enabled = True
+    argument = "payment 'quoted'; echo unsafe"
+
+    client._query("GetPayment", [argument])
+
+    parsed_command = shlex.split(calls[0])
+    constructor_index = parsed_command.index("-ccqc") + 1
+    assert json.loads(parsed_command[constructor_index]) == {"Args": ["GetPayment", argument]}

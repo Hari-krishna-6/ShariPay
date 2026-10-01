@@ -1,52 +1,67 @@
 #!/usr/bin/env bash
 
+function newCommandLog() {
+  mktemp "${TMPDIR:-/tmp}/drunix-command.XXXXXX"
+}
+
 # installChaincode PEER ORG
 function installChaincode() {
+  local log_file
+  log_file=$(newCommandLog) || return 1
   ORG=$1
   PEER=$2
   setGlobals $ORG $PEER
   set -x
-  peer lifecycle chaincode queryinstalled --output json | jq -r 'try (.installed_chaincodes[].package_id)' | grep ^${PACKAGE_ID}$ >&log.txt
+  peer lifecycle chaincode queryinstalled --output json | jq -r 'try (.installed_chaincodes[].package_id)' | grep ^${PACKAGE_ID}$ >&"$log_file"
   if test $? -ne 0; then
-    peer lifecycle chaincode install ${CC_NAME}.tar.gz >&log.txt
+    peer lifecycle chaincode install ${CC_NAME}.tar.gz >&"$log_file"
     res=$?
   fi
   { set +x; } 2>/dev/null
-  cat log.txt
+  cat "$log_file"
+  rm -f -- "$log_file"
   verifyResult $res "Chaincode installation on peer0.org${ORG} has failed"
   successln "Chaincode is installed on peer0.org${ORG}"
 }
 
 # queryInstalled PEER ORG
 function queryInstalled() {
+  local log_file
+  log_file=$(newCommandLog) || return 1
   ORG=$1
   PEER=$2
   setGlobals $ORG $PEER
   set -x
-  peer lifecycle chaincode queryinstalled --output json | jq -r 'try (.installed_chaincodes[].package_id)' | grep ^${PACKAGE_ID}$ >&log.txt
+  peer lifecycle chaincode queryinstalled --output json | jq -r 'try (.installed_chaincodes[].package_id)' | grep ^${PACKAGE_ID}$ >&"$log_file"
   res=$?
   { set +x; } 2>/dev/null
-  cat log.txt
+  cat "$log_file"
+  rm -f -- "$log_file"
   verifyResult $res "Query installed on peer0.org${ORG} has failed"
   successln "Query installed successful on peer0.org${ORG} on channel"
 }
 
 # approveForMyOrg VERSION PEER ORG
 function approveForMyOrg() {
+  local log_file
+  log_file=$(newCommandLog) || return 1
   ORG=$1
   PEER=$2
   setGlobals $ORG $PEER
   set -x
-  peer lifecycle chaincode approveformyorg -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --cafile "$ORDERER_CA" --channelID $CHANNEL_NAME --name ${CC_NAME} --version ${CC_VERSION} --package-id ${PACKAGE_ID} --sequence ${CC_SEQUENCE} ${INIT_REQUIRED} ${CC_END_POLICY} ${CC_COLL_CONFIG} >&log.txt
+  peer lifecycle chaincode approveformyorg -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --cafile "$ORDERER_CA" --channelID $CHANNEL_NAME --name ${CC_NAME} --version ${CC_VERSION} --package-id ${PACKAGE_ID} --sequence ${CC_SEQUENCE} ${INIT_REQUIRED} ${CC_END_POLICY} ${CC_COLL_CONFIG} >&"$log_file"
   res=$?
   { set +x; } 2>/dev/null
-  cat log.txt
+  cat "$log_file"
+  rm -f -- "$log_file"
   verifyResult $res "Chaincode definition approved on peer0.org${ORG} on channel '$CHANNEL_NAME' failed"
   successln "Chaincode definition approved on peer0.org${ORG} on channel '$CHANNEL_NAME'"
 }
 
 # checkCommitReadiness VERSION PEER ORG
 function checkCommitReadiness() {
+  local log_file
+  log_file=$(newCommandLog) || return 1
   ORG=$1
   PEER=$2
   shift 1
@@ -58,16 +73,17 @@ function checkCommitReadiness() {
     sleep $DELAY
     infoln "Attempting to check the commit readiness of the chaincode definition on peer0.org${ORG}, Retry after $DELAY seconds."
     set -x
-    peer lifecycle chaincode checkcommitreadiness --channelID $CHANNEL_NAME --name ${CC_NAME} --version ${CC_VERSION} --sequence ${CC_SEQUENCE} ${INIT_REQUIRED} ${CC_END_POLICY} ${CC_COLL_CONFIG} --output json >&log.txt
+    peer lifecycle chaincode checkcommitreadiness --channelID $CHANNEL_NAME --name ${CC_NAME} --version ${CC_VERSION} --sequence ${CC_SEQUENCE} ${INIT_REQUIRED} ${CC_END_POLICY} ${CC_COLL_CONFIG} --output json >&"$log_file"
     res=$?
     { set +x; } 2>/dev/null
     let rc=0
     for var in "$@"; do
-      grep "$var" log.txt &>/dev/null || let rc=1
+      grep "$var" "$log_file" &>/dev/null || let rc=1
     done
     COUNTER=$(expr $COUNTER + 1)
   done
-  cat log.txt
+  cat "$log_file"
+  rm -f -- "$log_file"
   if test $rc -eq 0; then
     infoln "Checking the commit readiness of the chaincode definition successful on peer0.org${ORG} on channel '$CHANNEL_NAME'"
   else
@@ -77,6 +93,8 @@ function checkCommitReadiness() {
 
 # commitChaincodeDefinition VERSION PEER ORG (PEER ORG)...
 function commitChaincodeDefinition() {
+  local log_file
+  log_file=$(newCommandLog) || return 1
   parsePeerConnectionParameters $@
   res=$?
   verifyResult $res "Invoke transaction failed on channel '$CHANNEL_NAME' due to uneven number of peer and org parameters "
@@ -85,16 +103,19 @@ function commitChaincodeDefinition() {
   # peer (if join was successful), let's supply it directly as we know
   # it using the "-o" option
   set -x
-  peer lifecycle chaincode commit -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --cafile "$ORDERER_CA" --channelID $CHANNEL_NAME --name ${CC_NAME} "${PEER_CONN_PARMS[@]}" --version ${CC_VERSION} --sequence ${CC_SEQUENCE} ${INIT_REQUIRED} ${CC_END_POLICY} ${CC_COLL_CONFIG} >&log.txt
+  peer lifecycle chaincode commit -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --cafile "$ORDERER_CA" --channelID $CHANNEL_NAME --name ${CC_NAME} "${PEER_CONN_PARMS[@]}" --version ${CC_VERSION} --sequence ${CC_SEQUENCE} ${INIT_REQUIRED} ${CC_END_POLICY} ${CC_COLL_CONFIG} >&"$log_file"
   res=$?
   { set +x; } 2>/dev/null
-  cat log.txt
+  cat "$log_file"
+  rm -f -- "$log_file"
   verifyResult $res "Chaincode definition commit failed on peer0.org${ORG} on channel '$CHANNEL_NAME' failed"
   successln "Chaincode definition committed on channel '$CHANNEL_NAME'"
 }
 
 # queryCommitted ORG
 function queryCommitted() {
+  local log_file
+  log_file=$(newCommandLog) || return 1
   ORG=$1
   PEER=$2
   setGlobals $ORG $PEER
@@ -108,14 +129,15 @@ function queryCommitted() {
     sleep $DELAY
     infoln "Attempting to Query committed status on peer0.org${ORG}, Retry after $DELAY seconds."
     set -x
-    peer lifecycle chaincode querycommitted --channelID $CHANNEL_NAME --name ${CC_NAME} >&log.txt
+    peer lifecycle chaincode querycommitted --channelID $CHANNEL_NAME --name ${CC_NAME} >&"$log_file"
     res=$?
     { set +x; } 2>/dev/null
-    test $res -eq 0 && VALUE=$(cat log.txt | grep -o '^Version: '$CC_VERSION', Sequence: [0-9]*, Endorsement Plugin: escc, Validation Plugin: vscc')
+    test $res -eq 0 && VALUE=$(grep -o '^Version: '$CC_VERSION', Sequence: [0-9]*, Endorsement Plugin: escc, Validation Plugin: vscc' "$log_file")
     test "$VALUE" = "$EXPECTED_RESULT" && let rc=0
     COUNTER=$(expr $COUNTER + 1)
   done
-  cat log.txt
+  cat "$log_file"
+  rm -f -- "$log_file"
   if test $rc -eq 0; then
     successln "Query chaincode definition successful on peer0.org${ORG} on channel '$CHANNEL_NAME'"
   else
@@ -124,6 +146,8 @@ function queryCommitted() {
 }
 
 function chaincodeInvokeInit() {
+  local log_file
+  log_file=$(newCommandLog) || return 1
   parsePeerConnectionParameters $@
   res=$?
   verifyResult $res "Invoke transaction failed on channel '$CHANNEL_NAME' due to uneven number of peer and org parameters "
@@ -140,18 +164,21 @@ function chaincodeInvokeInit() {
     # it using the "-o" option
     set -x
     infoln "invoke fcn call:${fcn_call}"
-    peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --cafile "$ORDERER_CA" -C $CHANNEL_NAME -n ${CC_NAME} "${PEER_CONN_PARMS[@]}" --isInit -c ${fcn_call} >&log.txt
+    peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --cafile "$ORDERER_CA" -C $CHANNEL_NAME -n ${CC_NAME} "${PEER_CONN_PARMS[@]}" --isInit -c ${fcn_call} >&"$log_file"
     res=$?
     { set +x; } 2>/dev/null
     let rc=$res
     COUNTER=$(expr $COUNTER + 1)
   done
-  cat log.txt
+  cat "$log_file"
+  rm -f -- "$log_file"
   verifyResult $res "Invoke execution on $PEERS failed "
   successln "Invoke transaction successful on $PEERS on channel '$CHANNEL_NAME'"
 }
 
 function chaincodeQuery() {
+  local log_file
+  log_file=$(newCommandLog) || return 1
   ORG=$1
   PEER=$2
   setGlobals $ORG $PEER
@@ -164,13 +191,14 @@ function chaincodeQuery() {
     sleep $DELAY
     infoln "Attempting to Query peer0.org${ORG}, Retry after $DELAY seconds."
     set -x
-    peer chaincode query -C $CHANNEL_NAME -n ${CC_NAME} -c '{"Args":["org.hyperledger.fabric:GetMetadata"]}' >&log.txt
+    peer chaincode query -C $CHANNEL_NAME -n ${CC_NAME} -c '{"Args":["org.hyperledger.fabric:GetMetadata"]}' >&"$log_file"
     res=$?
     { set +x; } 2>/dev/null
     let rc=$res
     COUNTER=$(expr $COUNTER + 1)
   done
-  cat log.txt
+  cat "$log_file"
+  rm -f -- "$log_file"
   if test $rc -eq 0; then
     successln "Query successful on peer0.org${ORG} on channel '$CHANNEL_NAME'"
   else
@@ -231,6 +259,8 @@ function resolveSequence() {
 
 queryInstalledOnPeer() {
 
+  local log_file
+  log_file=$(newCommandLog) || return 1
   local rc=1
   local COUNTER=1
   # continue to poll
@@ -238,16 +268,19 @@ queryInstalledOnPeer() {
   while [ $rc -ne 0 -a $COUNTER -lt $MAX_RETRY ]; do
     #sleep $DELAY
     #infoln "Attempting to list on peer0.org${ORG}, Retry after $DELAY seconds."
-    peer lifecycle chaincode queryinstalled >&log.txt
+    peer lifecycle chaincode queryinstalled >&"$log_file"
     res=$?
     let rc=$res
     COUNTER=$(expr $COUNTER + 1)
   done
-  cat log.txt
+  cat "$log_file"
+  rm -f -- "$log_file"
 }
 
 queryCommittedOnChannel() {
   CHANNEL=$1
+  local log_file
+  log_file=$(newCommandLog) || return 1
   local rc=1
   local COUNTER=1
   # continue to poll
@@ -255,12 +288,13 @@ queryCommittedOnChannel() {
   while [ $rc -ne 0 -a $COUNTER -lt $MAX_RETRY ]; do
     #sleep $DELAY
     #infoln "Attempting to list on peer0.org${ORG}, Retry after $DELAY seconds."
-    peer lifecycle chaincode querycommitted -C $CHANNEL >&log.txt
+    peer lifecycle chaincode querycommitted -C $CHANNEL >&"$log_file"
     res=$?
     let rc=$res
     COUNTER=$(expr $COUNTER + 1)
   done
-  cat log.txt
+  cat "$log_file"
+  rm -f -- "$log_file"
   if test $rc -ne 0; then
     fatalln "After $MAX_RETRY attempts, Failed to retrieve committed chaincode!"
   fi
@@ -296,13 +330,22 @@ chaincodeInvoke() {
   CHANNEL=$2
   CC_NAME=$3
   CC_INVOKE_CONSTRUCTOR=$4
+  local log_file=${DRUNIX_LOG_FILE:-}
+  local owns_log_file=false
+  if [ -z "$log_file" ]; then
+    log_file=$(mktemp "${TMPDIR:-/tmp}/drunix-invoke.XXXXXX") || return 1
+    owns_log_file=true
+  fi
   
   infoln "Invoking on peer0.org${ORG} on channel '$CHANNEL_NAME'..."
   set -x
-  peer chaincode invoke -o localhost:7050 -C $CHANNEL_NAME -n ${CC_NAME} -c ${CC_INVOKE_CONSTRUCTOR} --tls --cafile $ORDERER_CA --peerAddresses localhost:7051 --tlsRootCertFiles $PEER0_ORG1_CA --peerAddresses localhost:9051 --tlsRootCertFiles $PEER0_ORG2_CA --waitForEvent --waitForEventTimeout 60s >&log.txt
+  peer chaincode invoke -o localhost:7050 -C $CHANNEL_NAME -n ${CC_NAME} -c ${CC_INVOKE_CONSTRUCTOR} --tls --cafile $ORDERER_CA --peerAddresses localhost:7051 --tlsRootCertFiles $PEER0_ORG1_CA --peerAddresses localhost:9051 --tlsRootCertFiles $PEER0_ORG2_CA --waitForEvent --waitForEventTimeout 60s >&"$log_file"
   res=$?
   { set +x; } 2>/dev/null
-  cat log.txt
+  cat "$log_file"
+  if [ "$owns_log_file" = true ]; then
+    rm -f -- "$log_file"
+  fi
   verifyResult $res "Invoke or commit validation failed on peer0.org${ORG} on channel '$CHANNEL_NAME'"
   successln "Invoke committed on peer0.org${ORG} on channel '$CHANNEL_NAME'"
 }
@@ -312,6 +355,12 @@ chaincodeQuery() {
   CHANNEL=$2
   CC_NAME=$3
   CC_QUERY_CONSTRUCTOR=$4
+  local log_file=${DRUNIX_LOG_FILE:-}
+  local owns_log_file=false
+  if [ -z "$log_file" ]; then
+    log_file=$(mktemp "${TMPDIR:-/tmp}/drunix-query.XXXXXX") || return 1
+    owns_log_file=true
+  fi
 
   infoln "Querying on peer0.org${ORG} on channel '$CHANNEL_NAME'..."
   local rc=1
@@ -322,13 +371,16 @@ chaincodeQuery() {
     sleep $DELAY
     infoln "Attempting to Query peer0.org${ORG}, Retry after $DELAY seconds."
     set -x
-    peer chaincode query -C $CHANNEL_NAME -n ${CC_NAME} -c ${CC_QUERY_CONSTRUCTOR} >&log.txt
+    peer chaincode query -C $CHANNEL_NAME -n ${CC_NAME} -c ${CC_QUERY_CONSTRUCTOR} >&"$log_file"
     res=$?
     { set +x; } 2>/dev/null
     let rc=$res
     COUNTER=$(expr $COUNTER + 1)
   done
-  cat log.txt
+  cat "$log_file"
+  if [ "$owns_log_file" = true ]; then
+    rm -f -- "$log_file"
+  fi
   if test $rc -eq 0; then
     successln "Query successful on peer0.org${ORG} on channel '$CHANNEL_NAME'"
   else

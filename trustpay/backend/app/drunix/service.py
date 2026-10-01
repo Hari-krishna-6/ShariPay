@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 from decimal import Decimal
 from typing import Any
@@ -50,8 +53,21 @@ class DrunixPaymentClient:
         return self._to_wsl_path(self.network_path.parent / "bin")
 
     def _run_bash(self, command: str) -> subprocess.CompletedProcess[str]:
-        shell_command = f'export PATH="{self._bash_peer_cli_path()}:$PATH" && {command}'
-        return subprocess.run(["bash", "-lc", shell_command], capture_output=True, text=True, check=False)
+        with tempfile.TemporaryDirectory(prefix="trustpay-drunix-") as temp_dir:
+            host_log_path = Path(temp_dir) / "command.log"
+            environment = os.environ.copy()
+            environment["DRUNIX_LOG_FILE"] = self._to_wsl_path(host_log_path)
+            shell_command = (
+                f'export PATH={shlex.quote(self._bash_peer_cli_path())}:"$PATH" && '
+                f'export DRUNIX_LOG_FILE={shlex.quote(environment["DRUNIX_LOG_FILE"])} && {command}'
+            )
+            return subprocess.run(
+                ["bash", "-lc", shell_command],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+            )
 
     def is_enabled(self) -> bool:
         return self.enabled
@@ -89,6 +105,10 @@ class DrunixPaymentClient:
         raise DrunixClientError(f"DRUNIX invoke failed for {function_name}: {message}")
 
     @staticmethod
+    def _command_output(result: subprocess.CompletedProcess[str]) -> str:
+        return "\n".join(output.strip() for output in (result.stdout, result.stderr) if output.strip())
+
+    @staticmethod
     def _decode_response(output: str) -> Any:
         text = output.strip()
         if not text:
@@ -112,17 +132,17 @@ class DrunixPaymentClient:
             return None
         payload = {"Args": [function_name, *args]}
         command = (
-            'cd "{path}" && DELAY=3 ./network.sh cc invoke -c {channel} -ccn {chaincode} '
-            "-ccic '{payload}'"
+            "cd {path} && DELAY=3 ./network.sh cc invoke -c {channel} -ccn {chaincode} "
+            "-ccic {payload}"
         ).format(
-            path=self._bash_network_path(),
-            channel=self.channel,
-            chaincode=self.chaincode,
-            payload=json.dumps(payload, separators=(",", ":")),
+            path=shlex.quote(self._bash_network_path()),
+            channel=shlex.quote(self.channel),
+            chaincode=shlex.quote(self.chaincode),
+            payload=shlex.quote(json.dumps(payload, separators=(",", ":"))),
         )
         result = self._run_bash(command)
         if result.returncode != 0:
-            self._raise_invoke_error(function_name, result.stderr.strip() or result.stdout.strip())
+            self._raise_invoke_error(function_name, self._command_output(result))
         response = self._decode_response(result.stdout)
         if isinstance(response, dict) and response.get("status") == "ERROR":
             raise DrunixClientError(f"DRUNIX invoke returned an error for {function_name}: {response}")
@@ -133,18 +153,18 @@ class DrunixPaymentClient:
             return None
         payload = {"Args": [function_name, *args]}
         command = (
-            'cd "{path}" && DELAY=3 ./network.sh cc query -c {channel} -ccn {chaincode} '
-            "-ccqc '{payload}'"
+            "cd {path} && DELAY=3 ./network.sh cc query -c {channel} -ccn {chaincode} "
+            "-ccqc {payload}"
         ).format(
-            path=self._bash_network_path(),
-            channel=self.channel,
-            chaincode=self.chaincode,
-            payload=json.dumps(payload, separators=(",", ":")),
+            path=shlex.quote(self._bash_network_path()),
+            channel=shlex.quote(self.channel),
+            chaincode=shlex.quote(self.chaincode),
+            payload=shlex.quote(json.dumps(payload, separators=(",", ":"))),
         )
         result = self._run_bash(command)
         if result.returncode != 0:
             raise DrunixClientError(
-                f"DRUNIX query failed for {function_name}: {result.stderr.strip() or result.stdout.strip()}"
+                f"DRUNIX query failed for {function_name}: {self._command_output(result)}"
             )
         response = self._decode_response(result.stdout)
         if isinstance(response, dict) and response.get("status") == "ERROR":
@@ -182,8 +202,28 @@ class DrunixPaymentClient:
             risk_level,
             policy_decision,
         ]
-        self._invoke("SubmitPayment", args)
+        invoke_error: DrunixClientError | None = None
+        try:
+            self._invoke("SubmitPayment", args)
+        except DrunixConflictError:
+            raise
+        except DrunixClientError as exc:
+            invoke_error = exc
         latest = self.query_payment(transaction_id)
+        if invoke_error is not None and not self._matches_submitted_payment(
+            latest,
+            transaction_id,
+            sender_user_id,
+            receiver_user_id,
+            sender_account_id,
+            receiver_account_id,
+            self._minor_units(amount),
+            currency,
+            float(risk_score),
+            risk_level,
+            policy_decision,
+        ):
+            raise invoke_error
         sender = self.query_account(sender_account_id)
         receiver = self.query_account(receiver_account_id)
         return {
@@ -207,6 +247,39 @@ class DrunixPaymentClient:
         if isinstance(result, dict):
             return result.get("data", [])
         return []
+
+    def _matches_submitted_payment(
+        self,
+        payment: Any,
+        transaction_id: str,
+        sender_user_id: str,
+        receiver_user_id: str,
+        sender_account_id: str,
+        receiver_account_id: str,
+        amount_minor: int,
+        currency: str,
+        risk_score: float,
+        risk_level: str,
+        policy_decision: str,
+    ) -> bool:
+        if not isinstance(payment, dict):
+            return False
+        expected = {
+            "transactionId": transaction_id,
+            "senderId": sender_user_id,
+            "receiverId": receiver_user_id,
+            "senderAccountId": sender_account_id,
+            "receiverAccountId": receiver_account_id,
+            "amountMinor": amount_minor,
+            "currency": currency,
+            "riskScore": risk_score,
+            "riskLevel": risk_level,
+            "policyDecision": policy_decision,
+        }
+        return (
+            all(payment.get(key) == value for key, value in expected.items())
+            and payment.get("status") in {"COMPLETED", "VERIFICATION_REQUIRED", "HELD", "REJECTED"}
+        )
 
     def sync_payment(
         self,

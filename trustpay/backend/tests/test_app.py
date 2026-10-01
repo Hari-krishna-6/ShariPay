@@ -928,10 +928,12 @@ def test_drunix_subprocess_prepends_configured_peer_cli_for_invoke_and_query(mon
     client._query("GetPayment", ["tx-1"])
 
     assert len(calls) == 2
-    expected_prefix = 'export PATH="/mnt/drunix-network/bin:$PATH" && '
     for command, kwargs in calls:
         assert command[:2] == ["bash", "-lc"]
-        assert command[2].startswith(expected_prefix)
-        assert kwargs == {"capture_output": True, "text": True, "check": False}
+        assert command[2].startswith('export PATH=/mnt/drunix-network/bin:"$PATH" && ')
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["check"] is False
+        assert "DRUNIX_LOG_FILE" in kwargs["env"]
     assert "./network.sh cc invoke" in calls[0][0][2]
     assert "./network.sh cc query" in calls[1][0][2]

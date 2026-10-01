@@ -17,7 +17,9 @@
 # this script is actually in and infer location from there. (putting first)
 
 ROOTDIR=$(cd "$(dirname "$0")" && pwd)
-export PATH=${ROOTDIR}/../../build/bin:${PWD}/../../build/bin:$PATH
+FABRIC_BIN_DIR=${ROOTDIR}/../bin
+BUILD_BIN_DIR=${ROOTDIR}/../../build/bin
+export PATH=${FABRIC_BIN_DIR}:${BUILD_BIN_DIR}:${PATH}
 export FABRIC_CFG_PATH=${PWD}/configtx
 export VERBOSE=false
 
@@ -122,7 +124,7 @@ function checkPrereqs() {
       exit 1
     fi
     CA_LOCAL_VERSION=$(fabric-ca-client version | sed -ne 's/ Version: //p')
-    CA_DOCKER_IMAGE_VERSION=$(${CONTAINER_CLI} run --rm -fabric-ca:latest fabric-ca-client version | sed -ne 's/ Version: //p' | head -1)
+    CA_DOCKER_IMAGE_VERSION=$(${CONTAINER_CLI} run --rm --entrypoint fabric-ca-client hyperledger/fabric-ca:latest version 2>/dev/null | sed -ne 's/ Version: //p' | head -1)
     infoln "CA_LOCAL_VERSION=$CA_LOCAL_VERSION"
     infoln "CA_DOCKER_IMAGE_VERSION=$CA_DOCKER_IMAGE_VERSION"
 

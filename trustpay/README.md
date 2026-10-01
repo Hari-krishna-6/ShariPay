@@ -75,7 +75,7 @@ trustpay/
 	backend/       FastAPI service, migrations, and API tests
 	chaincode/     Fabric payment contract and Go tests
 	docs/          Architecture, lifecycle, and integration evidence
-	frontend/      No web application is implemented in this repository
+	frontend/      React payment dashboard and user flows
 	ml/            Synthetic data generation, training, prediction, and tests
 ```
 
@@ -125,7 +125,7 @@ Never commit `.env` files, JWT secrets, passwords, private keys, or generated ne
 
 ## 20. Known limitations
 
-- No web frontend is implemented; `frontend/` is only an empty placeholder.
+- The React frontend is implemented under `frontend/` and is intended to be the application shell for the real backend flow.
 - No UPI/NPCI production integration, bank connectivity, real funds, or production fraud adjudication exists.
 - `GetAllPayments` can fail response-schema validation on legacy ledger records missing newer account/minor-amount fields. The backend demo uses keyed payment, account, and history queries; this is documented rather than forcing another lifecycle upgrade.
 - Simulated PostgreSQL balances may need controlled reconciliation with existing ledger accounts before a wider rollout.

@@ -1,12 +1,16 @@
 # DRUNIX Integration
 
-## Verified environment
+## Current environment
 
-The live local test network uses channel `mychannel` and Fabric chaincode identifier `trustpay`. The verified definition is version `1.9`, sequence `10`, package `trustpay_1.9:112b1c49559d05e217fe4babc05f6112cf73ffcf28d9c3834646b2d17ac94789`. Org1 and Org2 installed and approved that package. Commit transaction `85c89946c40d54fff55fea0c62c4c433e23a71b253f46f0909f7372327c06f9b` was VALID in block 163.
+The live local test network uses channel `mychannel` and Fabric chaincode identifier `trustpay`. The current verified definition is version `1.9`, sequence `1`, approved by Org1 and Org2. On 2026-10-01, both committing peers reported channel height `25`. The `peer0` nodes are lite peers and report block 0; use committing peers `peer1` (ports 7061 and 9061) when assessing ledger height.
 
-Do not use the old version `1.6` / sequence `7` example from earlier project revisions. Sequence 9 reported version 1.8 but was bound to the old v1.7 package; sequence 10 is the corrected package. Query the full committing peers for the current definition before any future lifecycle change. This documentation does not authorize or perform an upgrade.
+The sequence-10 definition and block-163 commit below are from a previous network ledger and are historical only. Query both committing peers before any future lifecycle change. This documentation does not authorize or perform an upgrade.
 
-In this network, `peer0` is configured as a lite peer and reports only block 0. The committing peers are `peer1` (ports 7061 and 9061); both reported height 178 and identical hashes during verification. Use the configured committing peers when assessing ledger height.
+## Legacy CreatePayment compatibility
+
+The current frontend posts payments to `/api/v1/payments`; the backend path calls `SubmitPayment`, which creates the payment and performs the selected transition atomically. `CreatePayment` is not called by the current frontend or backend payment flow. Its remaining backend sequence helper is not used in production submission.
+
+The deployed `CreatePayment` response is incompatible with its current contract schema: it returns empty account IDs that are omitted from JSON, while the schema requires `senderAccountId` and `receiverAccountId`. The peer rejects that legacy invocation during response-schema validation. No chaincode or lifecycle change was made; do not use this compatibility entry point for current payments.
 
 ## SubmitPayment contract
 
@@ -28,7 +32,7 @@ Keyed queries are preferred for payment verification:
 
 Exact request replay is idempotent; the same ID with changed data is rejected. Insufficient ledger balance is rejected without account/payment writes. PostgreSQL is not used as an authoritative settlement lock. Competing transactions that read/write the same sender-account key are validated by Fabric MVCC.
 
-## Live evidence (2026-09-30)
+## Previous-network evidence (2026-09-30; historical)
 
 - Basic `SubmitPayment`: VALID transaction `dc6fffa45ed2400255398359ee68a5a13032744260a27b9f4b965e759d9536e6` in block 164; final status `COMPLETED`, history sequences 1–4, sender 10,000 → 8,800 minor units, receiver 500 → 1,700.
 - Exact replay: VALID transaction `5c08d3ef463b946d20e9d51685546e34e149388e1b620ee7351b3da9e903b9e1` in block 168; no second debit/credit or history entry.
@@ -36,6 +40,12 @@ Exact request replay is idempotent; the same ID with changed data is rejected. I
 - Concurrent lifecycle conflict: block 177; one VALID approval, one `MVCC_READ_CONFLICT` (code 11); final status `APPROVED`.
 
 The peer `querycommitted` definition and the peer block validation filter were both inspected. Endorsement success alone is not treated as a committed transaction.
+
+## Commit-event wait behavior
+
+The test-network `ccutils.sh` invoke helper uses the peer CLI's `--waitForEvent` with a 60-second timeout and targets the lite peers on ports 7051 and 9051. In this Fabric CLI, `--waitForEvent` listens through each target peer's `DeliverFiltered` service. DRUNIX lite-peer forwarding is configured for the Gateway `CommitStatus` API, not for `DeliverFiltered`, so the CLI event wait can time out even after a committing peer validates and commits the transaction. Recent logs also show orderer delivery streams receiving `ENHANCE_YOUR_CALM` / `too_many_pings` GOAWAYs and reconnecting; this is a transport/event-delivery issue, not evidence that a transaction was lost or invalid.
+
+The backend does not treat invoke acceptance or a timeout as proof of commit. After a non-conflict invoke error it queries `GetPayment` and accepts the outcome only if all submitted fields match and the payment is terminal. MVCC and insufficient-ledger-balance errors remain failures. The wait timeout was not increased.
 
 ## Runtime and credentials
 

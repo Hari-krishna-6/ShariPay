@@ -4,8 +4,8 @@ import { authApi, paymentsApi } from './services/api'
 import { StatusMark } from './components/reactbits/ReactBits'
 
 const money = amount => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(Number(amount || 0))
-const initials = value => value.split(/\s|@/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase() || 'TP'
-const displayName = user => user?.email?.split('@')[0] || 'TrustPay user'
+const initials = value => value.split(/\s|@/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase() || 'SP'
+const displayName = user => user?.email?.split('@')[0] || 'ShariPay user'
 const paymentStatus = status => ({ COMPLETED: 'done', PENDING_RISK: 'pending', VERIFICATION_REQUIRED: 'pending', HELD: 'pending', REJECTED: 'failed', FAILED: 'failed', CANCELLED: 'failed' }[status] || 'pending')
 const paymentCopy = status => ({
   COMPLETED: ['Payment completed.', 'The backend confirmed this payment was settled.'],
@@ -17,7 +17,7 @@ const paymentCopy = status => ({
   CANCELLED: ['Payment cancelled.', 'This payment was cancelled.'],
 }[status] || ['Payment status', 'The backend returned an unrecognized payment state.'])
 
-function Brand() { return <div className="brand"><i><ShieldCheck size={20} /></i><span>trust<span>pay</span></span></div> }
+function Brand() { return <div className="brand"><i><ShieldCheck size={20} /></i><span>Shari<span>Pay</span></span></div> }
 
 function Shell({ page, navigate, user, onLogout, children }) {
   const nav = [['dashboard', LayoutDashboard, 'Overview'], ['send', Send, 'Send payment'], ['transactions', Clock3, 'Transactions']]
@@ -36,7 +36,7 @@ function Login({ onAuthenticated }) {
     event.preventDefault(); setError(''); setBusy(true)
     try { onAuthenticated(await (register ? authApi.register(email, password) : authApi.login(email, password))) } catch (err) { setError(err.message || 'Unable to authenticate') } finally { setBusy(false) }
   }
-  return <main className="login-page"><header><Brand /><span>India’s trusted real-time payments layer</span></header><div className="login-grid"><section className="login-copy"><p className="eyebrow">BUILT FOR INSTANT CONFIDENCE</p><h1>Money moves.<br />Trust stays.</h1><p>One intelligent payment layer for every transfer — verified before it settles.</p></section><section className="auth-card"><form className="auth-inner" onSubmit={submit}><div className="auth-title"><p className="eyebrow">{register ? 'CREATE YOUR ACCOUNT' : 'WELCOME BACK'}</p><h1>{register ? 'Start paying with confidence.' : 'Your payments, protected.'}</h1><p>{register ? 'Use a strong password: upper case, lower case, and a number.' : 'Sign in to your ShariPay account.'}</p></div><label>Email address<input required value={email} onChange={e => setEmail(e.target.value)} type="email" /></label><label>Password<input required minLength="8" value={password} onChange={e => setPassword(e.target.value)} type="password" /></label>{error && <p className="error-message" role="alert">{error}</p>}<button disabled={busy} className="primary wide" type="submit">{busy ? 'Please wait…' : register ? 'Create secure account' : 'Sign in securely'} <ArrowUpRight size={16} /></button><p className="switch">{register ? 'Already using TrustPay?' : 'New to TrustPay?'} <button type="button" onClick={() => { setRegister(!register); setError('') }}>{register ? 'Sign in' : 'Create account'}</button></p></form></section></div></main>
+  return <main className="login-page"><header><Brand /><span>India’s trusted real-time payments layer</span></header><div className="login-grid"><section className="login-copy"><p className="eyebrow">BUILT FOR INSTANT CONFIDENCE</p><h1>Money moves.<br />Trust stays.</h1><p>One intelligent payment layer for every transfer — verified before it settles.</p></section><section className="auth-card"><form className="auth-inner" onSubmit={submit}><div className="auth-title"><p className="eyebrow">{register ? 'CREATE YOUR ACCOUNT' : 'WELCOME BACK'}</p><h1>{register ? 'Start paying with confidence.' : 'Your payments, protected.'}</h1><p>{register ? 'Use a strong password: upper case, lower case, and a number.' : 'Sign in to your ShariPay account.'}</p></div><label>Email address<input required value={email} onChange={e => setEmail(e.target.value)} type="email" /></label><label>Password<input required minLength="8" value={password} onChange={e => setPassword(e.target.value)} type="password" /></label>{error && <p className="error-message" role="alert">{error}</p>}<button disabled={busy} className="primary wide" type="submit">{busy ? 'Please wait…' : register ? 'Create secure account' : 'Sign in securely'} <ArrowUpRight size={16} /></button><p className="switch">{register ? 'Already using ShariPay?' : 'New to ShariPay?'} <button type="button" onClick={() => { setRegister(!register); setError('') }}>{register ? 'Sign in' : 'Create account'}</button></p></form></section></div></main>
 }
 
 function TransactionList({ items, user, onSelect }) {
